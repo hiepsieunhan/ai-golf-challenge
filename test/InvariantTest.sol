@@ -6,45 +6,50 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {GrvtVault} from "../src/GrvtVault.sol";
 import {AaveV3Strategy} from "../src/strategies/AaveV3Strategy.sol";
 
-/// @title VaultHandler
-/// @notice Stateful handler for invariant fuzzing — calls vault operations in random order
-contract VaultHandler is Test {
+/// @title MultiAssetVaultHandler
+/// @notice Stateful handler for invariant fuzzing — calls vault operations across multiple assets
+contract MultiAssetVaultHandler is Test {
     GrvtVault public vault;
-    AaveV3Strategy public strategy;
-    address public asset;
     address public depositor;
     address public strategist;
-    address public grvtBank;
 
-    uint256 public totalDeposited;
-    uint256 public totalWithdrawn;
+    address[] public assets;
+    mapping(address => AaveV3Strategy) public strategies;
 
-    // Track ghost variables for invariant checks
-    uint256 public depositCount;
-    uint256 public deployCount;
-    uint256 public withdrawIdleCount;
-    uint256 public withdrawStrategyCount;
-    uint256 public harvestCount;
+    // Per-asset ghost variables
+    mapping(address => uint256) public totalDeposited;
+    mapping(address => uint256) public totalWithdrawn;
+    mapping(address => uint256) public opCount;
 
     constructor(
         GrvtVault _vault,
-        AaveV3Strategy _strategy,
-        address _asset,
         address _depositor,
         address _strategist,
-        address _grvtBank
+        address[] memory _assets,
+        AaveV3Strategy[] memory _strategies
     ) {
         vault = _vault;
-        strategy = _strategy;
-        asset = _asset;
         depositor = _depositor;
         strategist = _strategist;
-        grvtBank = _grvtBank;
+
+        for (uint256 i; i < _assets.length; ++i) {
+            assets.push(_assets[i]);
+            strategies[_assets[i]] = _strategies[i];
+        }
     }
 
-    function deposit(uint256 amount) external {
-        // Minimum 100 USDC to avoid Aave rounding issues with tiny amounts
-        amount = bound(amount, 100e6, 10_000_000e6);
+    /// @dev Select an asset based on fuzz seed
+    function _selectAsset(uint256 seed) internal view returns (address) {
+        return assets[seed % assets.length];
+    }
+
+    function deposit(uint256 seed, uint256 amount) external {
+        address asset = _selectAsset(seed);
+        // Use asset-appropriate minimums (USDC=6 decimals, WETH=18 decimals)
+        uint256 decimals = asset == assets[0] ? 6 : 18; // USDC first, WETH second
+        uint256 minAmt = 100 * (10 ** decimals);
+        uint256 maxAmt = 10_000 * (10 ** decimals);
+        amount = bound(amount, minAmt, maxAmt);
 
         deal(asset, depositor, amount);
         vm.startPrank(depositor);
@@ -52,22 +57,26 @@ contract VaultHandler is Test {
         vault.deposit(asset, amount);
         vm.stopPrank();
 
-        totalDeposited += amount;
-        depositCount++;
+        totalDeposited[asset] += amount;
+        opCount[asset]++;
     }
 
-    function deployToStrategy(uint256 amount) external {
+    function deployToStrategy(uint256 seed, uint256 amount) external {
+        address asset = _selectAsset(seed);
         uint256 idle = vault.idleBalance(asset);
-        if (idle < 1e6) return; // Skip tiny deploys that Aave rounds to 0
+        uint256 decimals = asset == assets[0] ? 6 : 18;
+        uint256 minDeploy = 10 ** decimals; // 1 USDC or 1 WETH as minimum
+        if (idle < minDeploy) return;
 
-        amount = bound(amount, 1e6, idle);
+        amount = bound(amount, minDeploy, idle);
 
         vm.prank(strategist);
         vault.deployToStrategy(asset, amount);
-        deployCount++;
+        opCount[asset]++;
     }
 
-    function withdrawIdle(uint256 amount) external {
+    function withdrawIdle(uint256 seed, uint256 amount) external {
+        address asset = _selectAsset(seed);
         uint256 idle = vault.idleBalance(asset);
         if (idle == 0) return;
 
@@ -77,11 +86,12 @@ contract VaultHandler is Test {
         vm.prank(strategist);
         vault.withdraw(asset, amount, recipient);
 
-        totalWithdrawn += amount;
-        withdrawIdleCount++;
+        totalWithdrawn[asset] += amount;
+        opCount[asset]++;
     }
 
-    function withdrawFromStrategy(uint256 amount) external {
+    function withdrawFromStrategy(uint256 seed, uint256 amount) external {
+        address asset = _selectAsset(seed);
         uint256 principal = vault.deployedPrincipal(asset);
         if (principal == 0) return;
 
@@ -89,10 +99,11 @@ contract VaultHandler is Test {
 
         vm.prank(strategist);
         vault.withdrawFromStrategy(asset, amount);
-        withdrawStrategyCount++;
+        opCount[asset]++;
     }
 
-    function harvest() external {
+    function harvest(uint256 seed) external {
+        address asset = _selectAsset(seed);
         uint256 principal = vault.deployedPrincipal(asset);
         if (principal == 0) return;
 
@@ -100,16 +111,19 @@ contract VaultHandler is Test {
         vm.warp(block.timestamp + 7 days);
         vm.roll(block.number + 50_400);
 
-        // Harvest may revert with NoYieldAvailable if yield is tiny — catch it
         vm.prank(strategist);
         try vault.harvest(asset) {
-            harvestCount++;
+            opCount[asset]++;
         } catch {}
+    }
+
+    function assetCount() external view returns (uint256) {
+        return assets.length;
     }
 }
 
 /// @title InvariantTest
-/// @notice Stateful fuzz test asserting accounting invariants hold regardless of call ordering.
+/// @notice Multi-asset stateful fuzz test asserting accounting invariants hold regardless of call ordering.
 /// @dev Requires a high-rate-limit RPC (e.g. Alchemy/Infura) via ETH_RPC_URL.
 ///      Free RPCs will 429 during invariant setup due to Foundry's address exploration.
 contract InvariantTest is Test {
@@ -119,8 +133,9 @@ contract InvariantTest is Test {
     address public constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
 
     GrvtVault public vault;
-    AaveV3Strategy public strategy;
-    VaultHandler public handler;
+    AaveV3Strategy public usdcStrategy;
+    AaveV3Strategy public wethStrategy;
+    MultiAssetVaultHandler public handler;
 
     address public admin;
     address public strategist;
@@ -140,52 +155,77 @@ contract InvariantTest is Test {
         vm.prank(admin);
         vault = new GrvtVault(admin, WETH, grvtBank);
 
-        strategy = new AaveV3Strategy(address(vault), AAVE_V3_POOL, USDC);
+        usdcStrategy = new AaveV3Strategy(address(vault), AAVE_V3_POOL, USDC);
+        wethStrategy = new AaveV3Strategy(address(vault), AAVE_V3_POOL, WETH);
 
         vm.startPrank(admin);
         vault.grantRole(vault.STRATEGIST_ROLE(), strategist);
         vault.grantRole(vault.DEPOSITOR_ROLE(), depositor);
         vault.grantRole(vault.GUARDIAN_ROLE(), guardian);
         vault.whitelistAsset(USDC);
-        vault.setStrategy(USDC, address(strategy));
+        vault.whitelistAsset(WETH);
+        vault.setStrategy(USDC, address(usdcStrategy));
+        vault.setStrategy(WETH, address(wethStrategy));
         vm.stopPrank();
 
-        handler = new VaultHandler(vault, strategy, USDC, depositor, strategist, grvtBank);
+        // Build asset/strategy arrays
+        address[] memory assets = new address[](2);
+        AaveV3Strategy[] memory strats = new AaveV3Strategy[](2);
+        assets[0] = USDC;
+        assets[1] = WETH;
+        strats[0] = usdcStrategy;
+        strats[1] = wethStrategy;
+
+        handler = new MultiAssetVaultHandler(vault, depositor, strategist, assets, strats);
 
         // Only target the handler for invariant calls
         targetContract(address(handler));
     }
 
-    /// @notice Vault's actual token balance must be >= tracked idle balance
+    /// @notice Vault's actual token balance must be >= tracked idle balance (per asset)
     function invariant_vaultBalanceCoversIdle() public view {
-        uint256 vaultBalance = IERC20(USDC).balanceOf(address(vault));
-        uint256 idle = vault.idleBalance(USDC);
+        _checkAsset(USDC);
+        _checkAsset(WETH);
+    }
+
+    function _checkAsset(address asset) internal view {
+        uint256 vaultBalance = IERC20(asset).balanceOf(address(vault));
+        uint256 idle = vault.idleBalance(asset);
         assertGe(vaultBalance, idle, "vault token balance must cover idle balance");
     }
 
-    /// @notice Strategy's totalDeployed must be >= vault's deployedPrincipal (yield can only increase)
-    ///         Allow small tolerance for Aave supply/withdraw rounding (up to 2 wei per operation)
+    /// @notice Strategy's totalDeployed must be >= vault's deployedPrincipal per asset
+    ///         (within Aave rounding tolerance)
     function invariant_strategyCoversDeployedPrincipal() public view {
+        _checkStrategyCovers(USDC, usdcStrategy);
+        _checkStrategyCovers(WETH, wethStrategy);
+    }
+
+    function _checkStrategyCovers(address asset, AaveV3Strategy strategy) internal view {
         uint256 deployed = strategy.totalDeployed();
-        uint256 principal = vault.deployedPrincipal(USDC);
-        uint256 totalOps = handler.deployCount() + handler.withdrawStrategyCount() + handler.harvestCount();
-        uint256 tolerance = totalOps * 2 + 2;
+        uint256 principal = vault.deployedPrincipal(asset);
+        uint256 ops = handler.opCount(asset);
+        uint256 tolerance = ops * 2 + 2;
         assertGe(deployed + tolerance, principal, "strategy totalDeployed must cover deployedPrincipal (within rounding)");
     }
 
-    /// @notice Accounting identity: idle + principal <= totalDeposited - totalWithdrawn
-    ///         (can be < due to Aave rounding on withdrawals)
+    /// @notice Accounting identity per asset: idle + principal <= totalDeposited - totalWithdrawn
     function invariant_accountingIdentity() public view {
-        uint256 idle = vault.idleBalance(USDC);
-        uint256 principal = vault.deployedPrincipal(USDC);
-        uint256 deposited = handler.totalDeposited();
-        uint256 withdrawn = handler.totalWithdrawn();
+        _checkAccounting(USDC);
+        _checkAccounting(WETH);
+    }
 
-        // Allow small rounding tolerance (2 wei per operation)
-        uint256 totalOps = handler.depositCount() + handler.deployCount()
-            + handler.withdrawIdleCount() + handler.withdrawStrategyCount()
-            + handler.harvestCount();
-        uint256 tolerance = totalOps * 2 + 1;
+    function _checkAccounting(address asset) internal view {
+        uint256 idle = vault.idleBalance(asset);
+        uint256 principal = vault.deployedPrincipal(asset);
+        uint256 deposited = handler.totalDeposited(asset);
+        uint256 withdrawn = handler.totalWithdrawn(asset);
+
+        // No deposits yet — skip (avoid underflow)
+        if (deposited == 0) return;
+
+        uint256 ops = handler.opCount(asset);
+        uint256 tolerance = ops * 2 + 1;
 
         assertLe(
             idle + principal,

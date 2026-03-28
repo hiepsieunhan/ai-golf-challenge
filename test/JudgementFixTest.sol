@@ -311,6 +311,33 @@ contract JudgementFixTest is BaseTest {
         assertApproxEqAbs(vault.idleBalance(USDC), 1_000_000e6, 2, "idle should recover funds");
     }
 
+    function test_migrateStrategy_harvestsYieldBeforeMigrating() public {
+        _depositUSDC(1_000_000e6);
+        vm.prank(strategist);
+        vault.deployToStrategy(USDC, 1_000_000e6);
+
+        // Warp to accrue yield
+        vm.warp(block.timestamp + 365 days);
+        vm.roll(block.number + 2_600_000);
+
+        uint256 pendingYield = usdcStrategy.pendingYield();
+        assertGt(pendingYield, 0, "should have pending yield");
+
+        uint256 bankBefore = IERC20(USDC).balanceOf(grvtBank);
+
+        AaveV3Strategy newStrategy = new AaveV3Strategy(address(vault), AAVE_V3_POOL, USDC);
+
+        vm.prank(admin);
+        vault.migrateStrategy(USDC, address(newStrategy));
+
+        // grvtBank should have received the yield (not mixed into idle)
+        uint256 bankAfter = IERC20(USDC).balanceOf(grvtBank);
+        assertGt(bankAfter - bankBefore, 0, "grvtBank should receive harvested yield during migration");
+
+        // Idle should recover ~principal only, not principal + yield
+        assertApproxEqAbs(vault.idleBalance(USDC), 1_000_000e6, 2, "idle should be ~principal, not principal+yield");
+    }
+
     // =========================================================================
     // Multi-step integration test
     // =========================================================================

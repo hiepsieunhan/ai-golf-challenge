@@ -302,7 +302,8 @@ contract GrvtVault is
     }
 
     /// @notice Atomically migrate from one strategy to another for an asset.
-    ///         Withdraws all funds from the old strategy, removes it, and sets the new one.
+    ///         Harvests accrued yield to grvtBank first, then withdraws all principal
+    ///         from the old strategy, removes it, and sets the new one.
     /// @param asset Token address
     /// @param newStrategy New IStrategy implementation address
     function migrateStrategy(address asset, address newStrategy) external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -314,10 +315,17 @@ contract GrvtVault is
         if (IStrategy(newStrategy).asset() != asset) revert StrategyAssetMismatch(asset, IStrategy(newStrategy).asset());
         if (IStrategy(newStrategy).vault() != address(this)) revert StrategyVaultMismatch(address(this), IStrategy(newStrategy).vault());
 
-        // Withdraw all from old strategy
+        // Harvest accrued yield to grvtBank before withdrawing principal
+        uint256 yieldHarvested;
         uint256 recovered;
         uint256 principal = deployedPrincipal[asset];
         if (principal > 0) {
+            // Harvest yield first — sends directly to grvtBank, not into idle
+            if (grvtBank != address(0)) {
+                yieldHarvested = IStrategy(oldStrategy).harvest(grvtBank);
+            }
+
+            // Withdraw remaining principal
             recovered = IStrategy(oldStrategy).emergencyWithdraw(address(this));
             idleBalance[asset] += recovered;
             deployedPrincipal[asset] = 0;

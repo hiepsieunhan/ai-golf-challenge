@@ -43,16 +43,16 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
     // -------------------------------------------------------------------------
 
     /// @notice The GrvtVault address that controls this strategy
-    address public immutable override vault;
+    address private immutable _VAULT;
 
     /// @notice Aave V3 Pool proxy address
-    address public immutable aavePool;
+    address private immutable _AAVE_POOL;
 
     /// @notice The aToken corresponding to the underlying asset
-    address public immutable aToken;
+    address private immutable _A_TOKEN;
 
     /// @notice The ERC-20 asset this strategy handles
-    address private immutable _asset;
+    address private immutable _ASSET;
 
     // -------------------------------------------------------------------------
     // State
@@ -67,7 +67,7 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
 
     /// @dev Restricts calls to the bound vault contract
     modifier onlyVault() {
-        if (msg.sender != vault) revert CallerNotVault(msg.sender);
+        if (msg.sender != _VAULT) revert CallerNotVault(msg.sender);
         _;
     }
 
@@ -76,22 +76,22 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
     // -------------------------------------------------------------------------
 
     /// @notice Deploy a new AaveV3Strategy
-    /// @param _vault The GrvtVault address
-    /// @param _aavePool The Aave V3 Pool proxy address
-    /// @param asset__ The ERC-20 asset this strategy manages
-    constructor(address _vault, address _aavePool, address asset__) {
-        if (_vault == address(0)) revert ZeroAddress();
-        if (_aavePool == address(0)) revert ZeroAddress();
-        if (asset__ == address(0)) revert ZeroAddress();
+    /// @param vault_ The GrvtVault address
+    /// @param aavePool_ The Aave V3 Pool proxy address
+    /// @param asset_ The ERC-20 asset this strategy manages
+    constructor(address vault_, address aavePool_, address asset_) {
+        if (vault_ == address(0)) revert ZeroAddress();
+        if (aavePool_ == address(0)) revert ZeroAddress();
+        if (asset_ == address(0)) revert ZeroAddress();
 
-        vault = _vault;
-        aavePool = _aavePool;
-        _asset = asset__;
+        _VAULT = vault_;
+        _AAVE_POOL = aavePool_;
+        _ASSET = asset_;
 
         // Resolve the aToken address from Aave's reserve data
-        address resolvedAToken = IPool(_aavePool).getReserveData(asset__).aTokenAddress;
+        address resolvedAToken = IPool(aavePool_).getReserveData(asset_).aTokenAddress;
         if (resolvedAToken == address(0)) revert ZeroAddress();
-        aToken = resolvedAToken;
+        _A_TOKEN = resolvedAToken;
     }
 
     // -------------------------------------------------------------------------
@@ -100,12 +100,17 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
 
     /// @inheritdoc IStrategy
     function asset() external view override returns (address) {
-        return _asset;
+        return _ASSET;
+    }
+
+    /// @inheritdoc IStrategy
+    function vault() external view override returns (address) {
+        return _VAULT;
     }
 
     /// @inheritdoc IStrategy
     function totalDeployed() public view override returns (uint256) {
-        return IERC20(aToken).balanceOf(address(this));
+        return IERC20(_A_TOKEN).balanceOf(address(this));
     }
 
     /// @notice Pending yield available for harvest
@@ -128,10 +133,10 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
         _principal += amount;
 
         // Interactions: approve, supply to Aave, reset approval
-        IERC20 token = IERC20(_asset);
-        token.forceApprove(aavePool, amount);
-        IPool(aavePool).supply(_asset, amount, address(this), REFERRAL_CODE);
-        token.forceApprove(aavePool, 0);
+        IERC20 token = IERC20(_ASSET);
+        token.forceApprove(_AAVE_POOL, amount);
+        IPool(_AAVE_POOL).supply(_ASSET, amount, address(this), REFERRAL_CODE);
+        token.forceApprove(_AAVE_POOL, 0);
 
         emit Deployed(amount);
     }
@@ -141,7 +146,7 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
         if (amount == 0) revert ZeroAmount();
 
         // Aave natively handles type(uint256).max as "withdraw all"
-        actual = IPool(aavePool).withdraw(_asset, amount, vault);
+        actual = IPool(_AAVE_POOL).withdraw(_ASSET, amount, _VAULT);
 
         // Adjust principal: floor at zero for safety (handles rounding)
         if (amount == type(uint256).max || actual >= _principal) {
@@ -163,10 +168,10 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
         yieldAmount = current - _principal;
 
         // Withdraw only the yield portion, send directly to recipient
-        uint256 actualYield = IPool(aavePool).withdraw(_asset, yieldAmount, recipient);
+        uint256 actualYield = IPool(_AAVE_POOL).withdraw(_ASSET, yieldAmount, recipient);
 
         // Re-sync principal to actual remaining aToken balance (handles Aave rounding)
-        _principal = IERC20(aToken).balanceOf(address(this));
+        _principal = IERC20(_A_TOKEN).balanceOf(address(this));
 
         emit YieldHarvested(actualYield, recipient);
         return actualYield;
@@ -176,11 +181,11 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
     function emergencyWithdraw(address recipient) external override onlyVault nonReentrant returns (uint256 recovered) {
         if (recipient == address(0)) revert ZeroAddress();
 
-        uint256 balance = IERC20(aToken).balanceOf(address(this));
+        uint256 balance = IERC20(_A_TOKEN).balanceOf(address(this));
         if (balance == 0) return 0;
 
         // Withdraw everything from Aave
-        recovered = IPool(aavePool).withdraw(_asset, type(uint256).max, recipient);
+        recovered = IPool(_AAVE_POOL).withdraw(_ASSET, type(uint256).max, recipient);
 
         _principal = 0;
 
