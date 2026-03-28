@@ -194,8 +194,8 @@ contract HappyPathTest is BaseTest {
         vm.prank(strategist);
         vault.harvest(USDC);
 
-        // Principal should be unchanged
-        assertEq(vault.deployedPrincipal(USDC), principalBefore, "principal must be unchanged after harvest");
+        // Principal should be approximately unchanged (re-synced to strategy's totalDeployed, Aave rounding ±1)
+        assertApproxEqAbs(vault.deployedPrincipal(USDC), principalBefore, 2, "principal must be ~unchanged after harvest");
 
         // Now withdraw all principal
         vm.prank(strategist);

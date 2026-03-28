@@ -65,6 +65,7 @@ contract GrvtVault is
     // -------------------------------------------------------------------------
 
     event Deposited(address indexed depositor, address indexed asset, uint256 amount);
+    event Withdrawn(address indexed recipient, address indexed asset, uint256 amount);
     event DeployedToStrategy(address indexed asset, address indexed strategy, uint256 amount);
     event WithdrawnFromStrategy(address indexed asset, address indexed strategy, uint256 amount);
     event Harvested(address indexed asset, address indexed strategy, uint256 yieldAmount, address recipient);
@@ -73,6 +74,7 @@ contract GrvtVault is
     event AssetRemoved(address indexed asset);
     event StrategySet(address indexed asset, address indexed strategy);
     event StrategyRemoved(address indexed asset, address indexed oldStrategy);
+    event StrategyMigrated(address indexed asset, address indexed oldStrategy, address indexed newStrategy);
     event GrvtBankUpdated(address indexed oldBank, address indexed newBank);
 
     // -------------------------------------------------------------------------
@@ -93,6 +95,7 @@ contract GrvtVault is
     error NoYieldAvailable(address asset);
     error StrategyVaultMismatch(address expected, address actual);
     error StrategyStillSet(address asset);
+    error IdleBalanceNotZero(address asset, uint256 balance);
 
     // -------------------------------------------------------------------------
     // Constructor
@@ -141,6 +144,28 @@ contract GrvtVault is
         IWETH(WETH).deposit{value: msg.value}();
         idleBalance[WETH] += msg.value;
         emit Deposited(msg.sender, WETH, msg.value);
+    }
+
+    // -------------------------------------------------------------------------
+    // Withdraw idle funds (STRATEGIST_ROLE)
+    // -------------------------------------------------------------------------
+
+    /// @notice Withdraw idle (undeployed) funds from the vault to a recipient
+    /// @param asset Token to withdraw
+    /// @param amount Amount to withdraw from idle balance
+    /// @param recipient Address to receive the funds
+    function withdraw(address asset, uint256 amount, address recipient) external nonReentrant onlyRole(STRATEGIST_ROLE) {
+        if (amount == 0) revert ZeroAmount();
+        if (recipient == address(0)) revert ZeroAddress();
+        if (!whitelistedAssets[asset]) revert AssetNotWhitelisted(asset);
+
+        uint256 idle = idleBalance[asset];
+        if (idle < amount) revert InsufficientIdleBalance(asset, idle, amount);
+
+        idleBalance[asset] -= amount;
+        IERC20(asset).safeTransfer(recipient, amount);
+
+        emit Withdrawn(recipient, asset, amount);
     }
 
     // -------------------------------------------------------------------------
@@ -202,6 +227,9 @@ contract GrvtVault is
         uint256 yieldAmount = IStrategy(strategy).harvest(grvtBank);
         if (yieldAmount == 0) revert NoYieldAvailable(asset);
 
+        // Re-sync vault's principal tracking to match strategy's post-harvest state
+        deployedPrincipal[asset] = IStrategy(strategy).totalDeployed();
+
         emit Harvested(asset, strategy, yieldAmount, grvtBank);
     }
 
@@ -225,6 +253,8 @@ contract GrvtVault is
     function removeAsset(address asset) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (!whitelistedAssets[asset]) revert AssetNotWhitelisted(asset);
         if (assetStrategy[asset] != address(0)) revert StrategyStillSet(asset);
+        uint256 idle = idleBalance[asset];
+        if (idle > 0) revert IdleBalanceNotZero(asset, idle);
 
         whitelistedAssets[asset] = false;
 
@@ -269,6 +299,33 @@ contract GrvtVault is
 
         assetStrategy[asset] = address(0);
         emit StrategyRemoved(asset, oldStrategy);
+    }
+
+    /// @notice Atomically migrate from one strategy to another for an asset.
+    ///         Withdraws all funds from the old strategy, removes it, and sets the new one.
+    /// @param asset Token address
+    /// @param newStrategy New IStrategy implementation address
+    function migrateStrategy(address asset, address newStrategy) external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
+        address oldStrategy = assetStrategy[asset];
+        if (oldStrategy == address(0)) revert StrategyNotSet(asset);
+        if (newStrategy == address(0)) revert ZeroAddress();
+
+        // Validate new strategy
+        if (IStrategy(newStrategy).asset() != asset) revert StrategyAssetMismatch(asset, IStrategy(newStrategy).asset());
+        if (IStrategy(newStrategy).vault() != address(this)) revert StrategyVaultMismatch(address(this), IStrategy(newStrategy).vault());
+
+        // Withdraw all from old strategy
+        uint256 principal = deployedPrincipal[asset];
+        if (principal > 0) {
+            uint256 recovered = IStrategy(oldStrategy).emergencyWithdraw(address(this));
+            idleBalance[asset] += recovered;
+            deployedPrincipal[asset] = 0;
+        }
+
+        // Swap strategy
+        assetStrategy[asset] = newStrategy;
+
+        emit StrategyMigrated(asset, oldStrategy, newStrategy);
     }
 
     /// @notice Set the yield recipient address
