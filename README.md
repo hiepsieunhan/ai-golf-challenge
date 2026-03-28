@@ -450,43 +450,48 @@ git commit -m "fix: addressed security findings and requirements gaps"
 
 ---
 
-## Step 6: Final Cleanup (Optional)
+## Step 6: Challenge Creator Review Loop
 
-**Time:** ~10 minutes
+**Time:** ~30–60 minutes (multiple iterations)
+**Who does it:** Claude Code plays the role of the challenge author, you fix what it finds
 
-### 6.1 Verify the submission tells a clear story
+After the automated Phase 3 review and fixes, we ran an additional review loop where Claude Code assumed the perspective of the challenge creator — the person who wrote `docs/requirements.md` and will judge submissions.
 
-A reviewer should be able to answer these three questions quickly from your code:
-1. How funds enter the system → look at deposit functions
-2. How funds move into and out of strategy → look at deploy/withdraw/harvest
-3. How an external party understands what the vault owns → look at TVL view functions
+This is different from Phase 3's automated reviewers. Those check for security bugs, requirements coverage, and code quality mechanically. The challenge creator review asks: *"If I were grading this submission, what would I dock points for?"*
 
-If any of these are unclear, ask Claude Code to improve the NatSpec or add a comment.
+### How it works
 
-### 6.2 Check git log
+1. **Ask Claude to review as the challenge author.** Prompt:
+   ```
+   Play the role of the engineer who created this challenge. Review the full
+   codebase against the requirements. Give your judgement — scoring, findings,
+   what works, what doesn't.
+   ```
 
-```bash
-git log --oneline
-```
+2. **Claude produces a judgement** — a structured review with per-criterion scoring, specific findings (with severity), and an overall verdict. Store it in `docs/judgement/`.
 
-Should look something like:
-```
-abc1234 fix: addressed security findings and requirements gaps
-def5678 review: security audit, requirements checklist, code quality review
-ghi9012 impl: wave 3 — hardening, RBAC tests, edge cases, NatSpec
-jkl3456 impl: wave 2 — core logic + happy path tests passing
-mno7890 impl: wave 1 — interfaces and skeletons compile
-pqr1234 architecture: finalized vault design
-stu5678 research: phase 1 complete
-vwx9012 init: foundry project with OpenZeppelin, Aave V3, and agent scaffold
-```
+3. **Fix the findings.** Ask Claude to address the actionable items. Commit the fixes.
 
-### 6.3 Final commit
+4. **Review again with fresh eyes.** Ask Claude to review the updated code as if seeing it for the first time. Repeat until findings converge to info-level only.
 
-```bash
-git add -A
-git commit -m "final: cleanup and submission"
-```
+### What this caught that Phase 3 missed
+
+The automated reviewers found security bugs and requirements gaps. The challenge creator review found **design gaps** — things that are technically correct but would lose points in a real evaluation:
+
+- No way to withdraw idle funds back to the treasury (capital goes in but can't come out without a strategy)
+- `deployedPrincipal` drifting from reality after harvest (confusing accounting for anyone reading the public state)
+- No atomic strategy migration path (operationally painful multi-step process)
+- No fuzz or invariant tests (weak signal for production-mindedness)
+
+Each iteration improved the score. The full history lives in `docs/judgement/`:
+
+| Round | Score | Key changes |
+|-------|-------|-------------|
+| 1 | 8/10 | Baseline — identified idle withdrawal gap, accounting drift |
+| 2 | 9/10 | Added `withdraw()`, `migrateStrategy()`, harvest re-sync, fuzz tests |
+| 3 | 9.5/10 | Dropped `AccessControlEnumerable` boilerplate, added `whenNotPaused` to withdraw, `emergencyWithdrawIdle`, invariant tests |
+| 4 | 9.5+/10 | Harvest-before-migrate, SCREAMING_SNAKE_CASE on strategy immutables, multi-asset invariant handler |
+| Final | 9.8/10 | Removed dead code guard, added `yieldHarvested` to migration event |
 
 ---
 
@@ -501,7 +506,7 @@ git commit -m "final: cleanup and submission"
 | Step 3: Implement | Type `/phase2-implement`, monitor | Agent team builds in 3 waves with feedback loops |
 | Step 4: Review | Type `/phase3-review`, wait | 3 subagents audit in parallel |
 | Step 5: Fix | Decide what to fix, tell Claude | Fixes issues, re-runs tests |
-| Step 6: Cleanup | Verify git log, skim code | Optional NatSpec improvements |
+| Step 6: Creator Review | Read judgement, decide what to fix, iterate | Reviews as challenge author, scores, identifies design gaps |
 
 **Total estimated time:** 2.5–5 hours depending on how deep you go in Step 2.
 
