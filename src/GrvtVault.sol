@@ -182,7 +182,7 @@ contract GrvtVault is
 
         uint256 actual = IStrategy(strategy).withdraw(amount);
 
-        if (amount == type(uint256).max || actual >= deployedPrincipal[asset]) {
+        if (amount == type(uint256).max || actual >= principal) {
             deployedPrincipal[asset] = 0;
         } else {
             deployedPrincipal[asset] -= actual;
@@ -251,7 +251,8 @@ contract GrvtVault is
         if (assetStrategy[asset] != address(0)) revert StrategyAlreadySet(asset);
         address strategyAsset = IStrategy(strategy).asset();
         if (strategyAsset != asset) revert StrategyAssetMismatch(asset, strategyAsset);
-        if (IStrategy(strategy).vault() != address(this)) revert StrategyVaultMismatch(address(this), IStrategy(strategy).vault());
+        address strategyVault = IStrategy(strategy).vault();
+        if (strategyVault != address(this)) revert StrategyVaultMismatch(address(this), strategyVault);
 
         assetStrategy[asset] = strategy;
         emit StrategySet(asset, strategy);

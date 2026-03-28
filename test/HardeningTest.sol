@@ -6,6 +6,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {GrvtVault} from "../src/GrvtVault.sol";
+import {AaveV3Strategy} from "../src/strategies/AaveV3Strategy.sol";
 
 /// @title HardeningTest
 /// @notice RBAC restriction tests, edge case tests, and emergency control tests
@@ -351,5 +352,27 @@ contract HardeningTest is BaseTest {
         vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(GrvtVault.StrategyStillSet.selector, USDC));
         vault.removeAsset(USDC);
+    }
+
+    function test_harvest_revertsWhen_noYieldAvailable() public {
+        _depositUSDC(1_000e6);
+        vm.prank(strategist);
+        vault.deployToStrategy(USDC, 1_000e6);
+
+        // No time warp — yield is zero immediately after deployment
+        vm.prank(strategist);
+        vm.expectRevert(abi.encodeWithSelector(GrvtVault.NoYieldAvailable.selector, USDC));
+        vault.harvest(USDC);
+    }
+
+    function test_setStrategy_revertsWhen_vaultMismatch() public {
+        // Deploy a strategy bound to a different vault
+        AaveV3Strategy wrongVaultStrategy = new AaveV3Strategy(address(0xDEAD), AAVE_V3_POOL, USDT);
+
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(GrvtVault.StrategyVaultMismatch.selector, address(vault), address(0xDEAD))
+        );
+        vault.setStrategy(USDT, address(wrongVaultStrategy));
     }
 }
