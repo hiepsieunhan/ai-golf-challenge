@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.34;
 
-import {AccessControlEnumerable} from "@openzeppelin/contracts/access/extensions/AccessControlEnumerable.sol";
 import {AccessControlDefaultAdminRules} from "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
@@ -25,7 +24,6 @@ interface IWETH {
 /// @dev Uses ReentrancyGuardTransient (EIP-1153 TSTORE/TLOAD). Deploy only to
 ///      networks with the Cancun hard fork activated (Ethereum mainnet post-March 2024).
 contract GrvtVault is
-    AccessControlEnumerable,
     AccessControlDefaultAdminRules,
     ReentrancyGuardTransient,
     Pausable
@@ -70,11 +68,12 @@ contract GrvtVault is
     event WithdrawnFromStrategy(address indexed asset, address indexed strategy, uint256 amount);
     event Harvested(address indexed asset, address indexed strategy, uint256 yieldAmount, address recipient);
     event EmergencyWithdrawal(address indexed asset, address indexed strategy, uint256 recovered);
+    event EmergencyIdleWithdrawal(address indexed asset, address indexed recipient, uint256 amount);
     event AssetWhitelisted(address indexed asset);
     event AssetRemoved(address indexed asset);
     event StrategySet(address indexed asset, address indexed strategy);
     event StrategyRemoved(address indexed asset, address indexed oldStrategy);
-    event StrategyMigrated(address indexed asset, address indexed oldStrategy, address indexed newStrategy);
+    event StrategyMigrated(address indexed asset, address indexed oldStrategy, address indexed newStrategy, uint256 recovered);
     event GrvtBankUpdated(address indexed oldBank, address indexed newBank);
 
     // -------------------------------------------------------------------------
@@ -151,10 +150,11 @@ contract GrvtVault is
     // -------------------------------------------------------------------------
 
     /// @notice Withdraw idle (undeployed) funds from the vault to a recipient
+    /// @dev Paused when guardian hits the panic button — use emergencyWithdrawIdle for admin override
     /// @param asset Token to withdraw
     /// @param amount Amount to withdraw from idle balance
     /// @param recipient Address to receive the funds
-    function withdraw(address asset, uint256 amount, address recipient) external nonReentrant onlyRole(STRATEGIST_ROLE) {
+    function withdraw(address asset, uint256 amount, address recipient) external nonReentrant whenNotPaused onlyRole(STRATEGIST_ROLE) {
         if (amount == 0) revert ZeroAmount();
         if (recipient == address(0)) revert ZeroAddress();
         if (!whitelistedAssets[asset]) revert AssetNotWhitelisted(asset);
@@ -315,9 +315,10 @@ contract GrvtVault is
         if (IStrategy(newStrategy).vault() != address(this)) revert StrategyVaultMismatch(address(this), IStrategy(newStrategy).vault());
 
         // Withdraw all from old strategy
+        uint256 recovered;
         uint256 principal = deployedPrincipal[asset];
         if (principal > 0) {
-            uint256 recovered = IStrategy(oldStrategy).emergencyWithdraw(address(this));
+            recovered = IStrategy(oldStrategy).emergencyWithdraw(address(this));
             idleBalance[asset] += recovered;
             deployedPrincipal[asset] = 0;
         }
@@ -325,7 +326,7 @@ contract GrvtVault is
         // Swap strategy
         assetStrategy[asset] = newStrategy;
 
-        emit StrategyMigrated(asset, oldStrategy, newStrategy);
+        emit StrategyMigrated(asset, oldStrategy, newStrategy, recovered);
     }
 
     /// @notice Set the yield recipient address
@@ -364,6 +365,21 @@ contract GrvtVault is
         deployedPrincipal[asset] = 0;
 
         emit EmergencyWithdrawal(asset, strategy, recovered);
+    }
+
+    /// @notice Emergency: withdraw idle funds to a recipient while paused
+    /// @param asset Token address
+    /// @param recipient Address to receive the funds
+    function emergencyWithdrawIdle(address asset, address recipient) external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (recipient == address(0)) revert ZeroAddress();
+
+        uint256 amount = idleBalance[asset];
+        if (amount == 0) revert ZeroAmount();
+
+        idleBalance[asset] = 0;
+        IERC20(asset).safeTransfer(recipient, amount);
+
+        emit EmergencyIdleWithdrawal(asset, recipient, amount);
     }
 
     // -------------------------------------------------------------------------
@@ -418,67 +434,6 @@ contract GrvtVault is
         return _assetList;
     }
 
-    // -------------------------------------------------------------------------
-    // Override resolution for dual AccessControl inheritance
-    // -------------------------------------------------------------------------
-
-    /// @inheritdoc AccessControlEnumerable
-    function supportsInterface(bytes4 interfaceId)
-        public
-        view
-        override(AccessControlEnumerable, AccessControlDefaultAdminRules)
-        returns (bool)
-    {
-        return super.supportsInterface(interfaceId);
-    }
-
-    /// @inheritdoc AccessControlDefaultAdminRules
-    function grantRole(bytes32 role, address account)
-        public
-        override(AccessControl, AccessControlDefaultAdminRules, IAccessControl)
-    {
-        super.grantRole(role, account);
-    }
-
-    /// @inheritdoc AccessControlDefaultAdminRules
-    function revokeRole(bytes32 role, address account)
-        public
-        override(AccessControl, AccessControlDefaultAdminRules, IAccessControl)
-    {
-        super.revokeRole(role, account);
-    }
-
-    /// @inheritdoc AccessControlDefaultAdminRules
-    function renounceRole(bytes32 role, address account)
-        public
-        override(AccessControl, AccessControlDefaultAdminRules, IAccessControl)
-    {
-        super.renounceRole(role, account);
-    }
-
-    /// @dev Resolves _setRoleAdmin between AccessControl and AccessControlDefaultAdminRules
-    function _setRoleAdmin(bytes32 role, bytes32 adminRole)
-        internal
-        override(AccessControl, AccessControlDefaultAdminRules)
-    {
-        super._setRoleAdmin(role, adminRole);
-    }
-
-    /// @dev Resolves _grantRole between AccessControlEnumerable and AccessControlDefaultAdminRules
-    function _grantRole(bytes32 role, address account)
-        internal
-        override(AccessControlEnumerable, AccessControlDefaultAdminRules)
-        returns (bool)
-    {
-        return super._grantRole(role, account);
-    }
-
-    /// @dev Resolves _revokeRole between AccessControlEnumerable and AccessControlDefaultAdminRules
-    function _revokeRole(bytes32 role, address account)
-        internal
-        override(AccessControlEnumerable, AccessControlDefaultAdminRules)
-        returns (bool)
-    {
-        return super._revokeRole(role, account);
-    }
+    /// @dev Intentionally no receive() or fallback() — ETH must enter via depositETH()
+    ///      to be properly accounted. Direct ETH sends will revert.
 }
