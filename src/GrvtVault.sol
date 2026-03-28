@@ -22,6 +22,8 @@ interface IWETH {
 /// @notice Core treasury vault for GRVT. Accepts capital from funding wallets,
 ///         holds it safely, deploys it into yield strategies, reports TVL,
 ///         and supports harvesting yield to grvtBank.
+/// @dev Uses ReentrancyGuardTransient (EIP-1153 TSTORE/TLOAD). Deploy only to
+///      networks with the Cancun hard fork activated (Ethereum mainnet post-March 2024).
 contract GrvtVault is
     AccessControlEnumerable,
     AccessControlDefaultAdminRules,
@@ -88,6 +90,9 @@ contract GrvtVault is
     error InsufficientIdleBalance(address asset, uint256 available, uint256 requested);
     error InsufficientDeployedBalance(address asset, uint256 available, uint256 requested);
     error GrvtBankNotSet();
+    error NoYieldAvailable(address asset);
+    error StrategyVaultMismatch(address expected, address actual);
+    error StrategyStillSet(address asset);
 
     // -------------------------------------------------------------------------
     // Constructor
@@ -177,7 +182,7 @@ contract GrvtVault is
 
         uint256 actual = IStrategy(strategy).withdraw(amount);
 
-        if (amount == type(uint256).max) {
+        if (amount == type(uint256).max || actual >= deployedPrincipal[asset]) {
             deployedPrincipal[asset] = 0;
         } else {
             deployedPrincipal[asset] -= actual;
@@ -195,10 +200,9 @@ contract GrvtVault is
         if (grvtBank == address(0)) revert GrvtBankNotSet();
 
         uint256 yieldAmount = IStrategy(strategy).harvest(grvtBank);
+        if (yieldAmount == 0) revert NoYieldAvailable(asset);
 
-        if (yieldAmount > 0) {
-            emit Harvested(asset, strategy, yieldAmount, grvtBank);
-        }
+        emit Harvested(asset, strategy, yieldAmount, grvtBank);
     }
 
     // -------------------------------------------------------------------------
@@ -220,6 +224,7 @@ contract GrvtVault is
     /// @param asset Token address
     function removeAsset(address asset) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (!whitelistedAssets[asset]) revert AssetNotWhitelisted(asset);
+        if (assetStrategy[asset] != address(0)) revert StrategyStillSet(asset);
 
         whitelistedAssets[asset] = false;
 
@@ -244,7 +249,9 @@ contract GrvtVault is
         if (strategy == address(0)) revert ZeroAddress();
         if (!whitelistedAssets[asset]) revert AssetNotWhitelisted(asset);
         if (assetStrategy[asset] != address(0)) revert StrategyAlreadySet(asset);
-        if (IStrategy(strategy).asset() != asset) revert StrategyAssetMismatch(asset, IStrategy(strategy).asset());
+        address strategyAsset = IStrategy(strategy).asset();
+        if (strategyAsset != asset) revert StrategyAssetMismatch(asset, strategyAsset);
+        if (IStrategy(strategy).vault() != address(this)) revert StrategyVaultMismatch(address(this), IStrategy(strategy).vault());
 
         assetStrategy[asset] = strategy;
         emit StrategySet(asset, strategy);

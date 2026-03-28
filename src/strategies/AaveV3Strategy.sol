@@ -9,6 +9,8 @@ import {IPool} from "@aave/v3-core/contracts/interfaces/IPool.sol";
 /// @title AaveV3Strategy
 /// @notice Aave V3 implementation of IStrategy. Holds aTokens, supplies/withdraws
 ///         from the Aave V3 Pool, and computes yield via aToken rebasing balance.
+/// @dev Uses ReentrancyGuardTransient (EIP-1153 TSTORE/TLOAD). Deploy only to
+///      networks with the Cancun hard fork activated (Ethereum mainnet post-March 2024).
 contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
     using SafeERC20 for IERC20;
 
@@ -161,11 +163,13 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
         yieldAmount = current - _principal;
 
         // Withdraw only the yield portion, send directly to recipient
-        IPool(aavePool).withdraw(_asset, yieldAmount, recipient);
+        uint256 actualYield = IPool(aavePool).withdraw(_asset, yieldAmount, recipient);
 
-        // _principal unchanged — remaining aToken balance still equals principal
+        // Re-sync principal to actual remaining aToken balance (handles Aave rounding)
+        _principal = IERC20(aToken).balanceOf(address(this));
 
-        emit YieldHarvested(yieldAmount, recipient);
+        emit YieldHarvested(actualYield, recipient);
+        return actualYield;
     }
 
     /// @inheritdoc IStrategy

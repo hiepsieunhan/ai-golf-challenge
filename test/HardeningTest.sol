@@ -4,6 +4,7 @@ pragma solidity 0.8.34;
 import {BaseTest} from "./BaseTest.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {GrvtVault} from "../src/GrvtVault.sol";
 
 /// @title HardeningTest
@@ -215,7 +216,7 @@ contract HardeningTest is BaseTest {
         deal(USDC, depositor, 1_000e6);
         vm.startPrank(depositor);
         IERC20(USDC).approve(address(vault), 1_000e6);
-        vm.expectRevert();
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         vault.deposit(USDC, 1_000e6);
         vm.stopPrank();
     }
@@ -227,7 +228,7 @@ contract HardeningTest is BaseTest {
         vault.pause();
 
         vm.prank(strategist);
-        vm.expectRevert();
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         vault.deployToStrategy(USDC, 1_000e6);
     }
 
@@ -236,7 +237,7 @@ contract HardeningTest is BaseTest {
         vault.pause();
 
         vm.prank(strategist);
-        vm.expectRevert();
+        vm.expectRevert(Pausable.EnforcedPause.selector);
         vault.harvest(USDC);
     }
 
@@ -318,5 +319,37 @@ contract HardeningTest is BaseTest {
             abi.encodeWithSelector(GrvtVault.StrategyAssetMismatch.selector, USDT, WETH)
         );
         vault.setStrategy(USDT, address(wethStrategy));
+    }
+
+    // =========================================================================
+    // Removal lifecycle — removeStrategy and removeAsset happy path
+    // =========================================================================
+
+    function test_removeStrategy_succeeds_when_noFundsDeployed() public {
+        // USDC strategy has no funds deployed (nothing was deposited/deployed in this test)
+        vm.prank(admin);
+        vault.removeStrategy(USDC);
+        assertEq(vault.assetStrategy(USDC), address(0), "strategy should be cleared");
+    }
+
+    function test_removeAsset_succeeds_afterStrategyRemoved() public {
+        vm.startPrank(admin);
+        vault.removeStrategy(USDC);
+        vault.removeAsset(USDC);
+        vm.stopPrank();
+
+        assertFalse(vault.whitelistedAssets(USDC), "USDC should no longer be whitelisted");
+
+        // Verify it's gone from getWhitelistedAssets
+        address[] memory assets = vault.getWhitelistedAssets();
+        for (uint256 i; i < assets.length; ++i) {
+            assertTrue(assets[i] != USDC, "USDC should not appear in asset list");
+        }
+    }
+
+    function test_removeAsset_revertsWhen_strategyStillSet() public {
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(GrvtVault.StrategyStillSet.selector, USDC));
+        vault.removeAsset(USDC);
     }
 }

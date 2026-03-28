@@ -176,4 +176,90 @@ contract HappyPathTest is BaseTest {
         // Aave rounds by up to 1 wei on supply
         assertApproxEqAbs(wethStrategy.totalDeployed(), 25 ether, 2, "strategy totalDeployed ~= 25 WETH");
     }
+
+    // -------------------------------------------------------------------------
+    // 11. Harvest preserves principal — then withdraw recovers it
+    // -------------------------------------------------------------------------
+
+    function test_harvest_preservesPrincipal_then_withdrawRecovers() public {
+        _depositAndDeploy(USDC, 1_000_000e6, 1_000_000e6);
+
+        uint256 principalBefore = vault.deployedPrincipal(USDC);
+
+        // Warp 1 year for yield
+        vm.warp(block.timestamp + 365 days);
+        vm.roll(block.number + 2_600_000);
+
+        // Harvest yield
+        vm.prank(strategist);
+        vault.harvest(USDC);
+
+        // Principal should be unchanged
+        assertEq(vault.deployedPrincipal(USDC), principalBefore, "principal must be unchanged after harvest");
+
+        // Now withdraw all principal
+        vm.prank(strategist);
+        vault.withdrawFromStrategy(USDC, type(uint256).max);
+
+        assertEq(vault.deployedPrincipal(USDC), 0, "deployed principal should be zero after full withdraw");
+        assertApproxEqAbs(vault.idleBalance(USDC), 1_000_000e6, 2, "idle should recover ~principal");
+    }
+
+    // -------------------------------------------------------------------------
+    // 12. getAllAssetBalances returns correct multi-asset breakdown
+    // -------------------------------------------------------------------------
+
+    function test_getAllAssetBalances_succeeds_withMultipleAssets() public {
+        _depositAndDeploy(USDC, 1_000_000e6, 500_000e6);
+        _depositWETH(50 ether);
+
+        (
+            address[] memory assets,
+            uint256[] memory idle,
+            uint256[] memory deployed,
+            uint256[] memory total
+        ) = vault.getAllAssetBalances();
+
+        // Should have 3 whitelisted assets (USDC, WETH, USDT)
+        assertEq(assets.length, 3, "should have 3 assets");
+        assertEq(idle.length, 3, "idle array length should match");
+        assertEq(deployed.length, 3, "deployed array length should match");
+        assertEq(total.length, 3, "total array length should match");
+
+        // Find USDC index and verify
+        for (uint256 i; i < assets.length; ++i) {
+            if (assets[i] == USDC) {
+                assertEq(idle[i], 500_000e6, "USDC idle should be 500K");
+                assertApproxEqAbs(deployed[i], 500_000e6, 2, "USDC deployed ~= 500K");
+                assertApproxEqAbs(total[i], 1_000_000e6, 2, "USDC total ~= 1M");
+            } else if (assets[i] == WETH) {
+                assertEq(idle[i], 50 ether, "WETH idle should be 50");
+                assertEq(deployed[i], 0, "WETH deployed should be 0 (not deployed)");
+                assertEq(total[i], 50 ether, "WETH total should be 50");
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 13. getWhitelistedAssets returns all whitelisted assets
+    // -------------------------------------------------------------------------
+
+    function test_getWhitelistedAssets_succeeds() public view {
+        address[] memory assets = vault.getWhitelistedAssets();
+
+        assertEq(assets.length, 3, "should have 3 whitelisted assets");
+
+        // Verify all three are present (order may vary due to swap-and-pop)
+        bool hasUSDC;
+        bool hasWETH;
+        bool hasUSDT;
+        for (uint256 i; i < assets.length; ++i) {
+            if (assets[i] == USDC) hasUSDC = true;
+            if (assets[i] == WETH) hasWETH = true;
+            if (assets[i] == USDT) hasUSDT = true;
+        }
+        assertTrue(hasUSDC, "USDC should be whitelisted");
+        assertTrue(hasWETH, "WETH should be whitelisted");
+        assertTrue(hasUSDT, "USDT should be whitelisted");
+    }
 }
