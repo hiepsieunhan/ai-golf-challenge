@@ -122,14 +122,14 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
     function deploy(uint256 amount) external override onlyVault nonReentrant {
         if (amount == 0) revert ZeroAmount();
 
-        IERC20 token = IERC20(_asset);
+        // Effects before interactions (CEI pattern)
+        _principal += amount;
 
-        // Approve Aave Pool to pull tokens, then supply
+        // Interactions: approve, supply to Aave, reset approval
+        IERC20 token = IERC20(_asset);
         token.forceApprove(aavePool, amount);
         IPool(aavePool).supply(_asset, amount, address(this), REFERRAL_CODE);
         token.forceApprove(aavePool, 0);
-
-        _principal += amount;
 
         emit Deployed(amount);
     }
