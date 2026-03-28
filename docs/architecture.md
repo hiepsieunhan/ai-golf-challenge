@@ -494,6 +494,8 @@ The AaveV3Strategy receives WETH like any other ERC20. It calls `IPool.supply(WE
 | `whitelistAsset` | No | No | DEFAULT_ADMIN | Config only |
 | `setStrategy` | No | No | DEFAULT_ADMIN | Config only |
 | `setGrvtBank` | No | No | DEFAULT_ADMIN | Config only |
+| `removeAsset` | No | No | DEFAULT_ADMIN | Config only |
+| `removeStrategy` | No | No | DEFAULT_ADMIN | Config only |
 
 ---
 
