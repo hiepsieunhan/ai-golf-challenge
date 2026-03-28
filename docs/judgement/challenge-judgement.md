@@ -1,86 +1,101 @@
 # Challenge Judgement — GRVT Yield Vault
 
 **Reviewer**: Challenge creator perspective
-**Date**: 2026-03-29
+**Date**: 2026-03-29 (updated after fix round)
 **Scope**: Full codebase review against challenge requirements
 
 ---
 
-## Verdict: Solid submission. Meets all core requirements.
+## Verdict: Strong submission. All core requirements met, previous findings addressed.
 
 ---
 
-## What Works Well
+## Round 1 Findings — Status
 
-1. **Architecture is clean.** Vault + Strategy Interface pattern is the right separation. The vault knows nothing about Aave. Adding a Compound strategy later is straightforward.
-
-2. **RBAC is thoughtful.** Four roles (Admin, Strategist, Depositor, Guardian) with proper separation — admin can't move funds operationally, strategist can't change config. `AccessControlDefaultAdminRules` with 1-day delay for admin transfer is a production-minded touch many submissions miss.
-
-3. **Aave integration is correct.** Strategy resolves aToken from `getReserveData`, uses `forceApprove` (resets to 0 after), handles `type(uint256).max` for full withdrawals. Principal re-sync after harvest (`_principal = aToken.balanceOf(this)`) correctly handles Aave rounding.
-
-4. **Fee-on-transfer handling in `deposit()`** — before/after balance check pattern.
-
-5. **Emergency design is sound.** `withdrawFromStrategy` and `emergencyWithdrawFromStrategy` both work when paused. Critical — pause must not trap funds.
-
-6. **Test coverage is reasonable.** Happy path covers full lifecycle (deposit -> deploy -> yield -> harvest -> withdraw). RBAC tests cover every privileged function. Edge cases hit zero amounts, mismatches, insufficient balances. USDT test with low-level approve is a nice touch.
-
----
-
-## Issues
-
-### Medium Severity
-
-#### M-01: No withdrawal mechanism for idle funds
-
-Capital goes in but there's no `withdraw()` function to pull idle funds *out* of the vault back to the treasury or funding wallet. If you deposit 1M USDC and only deploy 500K, the other 500K is stuck unless you deploy and withdraw through a strategy. In a real treasury vault, you need to be able to pull money out.
-
-#### M-02: `deployedPrincipal` staleness after harvest
-
-The vault's `harvest()` calls `IStrategy(strategy).harvest(grvtBank)` but never updates `deployedPrincipal[asset]`. The strategy re-syncs its internal `_principal`, but the vault's `deployedPrincipal` mapping stays at the original deposit amount. `getAssetBalance()` reports correctly via `totalDeployed()` (reads live aToken balance), but `deployedPrincipal` as a public mapping gives stale data. Not a fund-loss bug, but confusing accounting.
-
-### Low Severity
-
-#### L-01: removeAsset allows removal with non-zero idle balance (unfixed)
-
-`removeAsset` doesn't check `idleBalance > 0`. Admin can hide funds from TVL reporting. The project's own re-review (NEW-01) caught this but it was never addressed.
-
-#### L-02: No `receive()` function
-
-Direct ETH sends revert. Consistent with the design (ETH goes through `depositETH()` which wraps to WETH), but worth documenting as intentional.
-
-#### L-03: Strategy replacement is operationally heavy
-
-`setStrategy` reverts if a strategy is already set. `removeStrategy` reverts if `deployedPrincipal > 0`. Migrating requires: withdraw all -> remove strategy -> set new strategy -> redeploy. Safe but operationally heavy. A `migrateStrategy` helper would improve this.
-
-### Nits
-
-- **Dual AccessControl inheritance boilerplate** — `AccessControlEnumerable` + `AccessControlDefaultAdminRules` creates ~60 lines of diamond resolution overrides (lines 368-426) that add no business logic. `AccessControlDefaultAdminRules` alone would suffice.
-- **No fuzz tests** — for a production-minded submission, even one fuzz test on deposit amounts or deploy/withdraw ratios would show stronger test thinking.
-- **Test file organization** — `HardeningTest` is a catch-all. Separate `RBACTest`, `EdgeCaseTest`, `EmergencyTest` would improve readability.
-- **`ReentrancyGuardTransient` on both vault AND strategy** — deploy/withdraw paths hit two transient storage locks. Not a bug (separate contracts, separate slots), but worth noting the gas overhead.
-
----
-
-## Scoring
-
-| Criterion | Rating | Notes |
+| ID | Finding | Status |
 |---|---|---|
-| Correctness | 8/10 | Core flows work, no fund-loss bugs, but idle fund withdrawal gap |
-| Architecture & Extensibility | 9/10 | Clean separation, easy to add strategies |
-| Security-mindedness | 8/10 | Reentrancy, CEI, SafeERC20, pause, emergency all present |
-| Accounting/Reporting | 7/10 | TVL reporting works but `deployedPrincipal` staleness is confusing |
-| RBAC | 9/10 | Four roles, proper separation, admin delay |
-| Test quality | 7/10 | Good coverage but no fuzz tests, no multi-step scenario tests |
-| Overall quality | **8/10** | |
+| M-01 | No withdrawal mechanism for idle funds | **FIXED** — `withdraw(asset, amount, recipient)` added, gated by `STRATEGIST_ROLE`, full input validation |
+| M-02 | `deployedPrincipal` staleness after harvest | **FIXED** — `harvest()` now re-syncs `deployedPrincipal[asset] = IStrategy(strategy).totalDeployed()` |
+| L-01 | `removeAsset` allows removal with non-zero idle balance | **FIXED** — `IdleBalanceNotZero` check added |
+| L-03 | Strategy replacement is operationally heavy | **FIXED** — `migrateStrategy()` added: atomic withdraw-from-old + set-new in one tx |
+| L-02 | No `receive()` function | N/A — design choice, not a bug |
+
+All four actionable findings were correctly addressed.
 
 ---
 
-## Process Observations
+## What Works Well (unchanged from round 1)
 
-Git history shows a clean phased approach: research -> architecture -> implementation (3 waves) -> review -> fix -> re-review -> fix. The iteration loop worked — re-review found issues and they were fixed. Research and review docs are thorough.
+1. **Architecture is clean.** Vault + Strategy Interface pattern, vault knows nothing about Aave.
+2. **RBAC is thoughtful.** Four roles with proper separation + `AccessControlDefaultAdminRules` 1-day delay.
+3. **Aave integration is correct.** aToken resolution, `forceApprove`, `type(uint256).max` handling, principal re-sync.
+4. **Fee-on-transfer handling** in `deposit()`.
+5. **Emergency design is sound.** Withdraw and emergency paths work when paused.
+6. **Test coverage is strong** — now includes fuzz tests and migration tests.
+
+---
+
+## Review of New Code
+
+### `withdraw()` (lines 157-169) — Good
+
+- Correct: `nonReentrant`, `STRATEGIST_ROLE`, validates zero amount/address/whitelist/balance
+- `SafeERC20.safeTransfer` for the transfer — handles non-standard tokens
+- Not `whenNotPaused` — this is a design decision worth noting. It means strategist can pull idle funds even when paused. Defensible for a treasury vault (you want to be able to move funds out during an incident), but different from `deployToStrategy` which IS paused. Intentional asymmetry.
+
+### `harvest()` re-sync (line 231) — Good
+
+- `deployedPrincipal[asset] = IStrategy(strategy).totalDeployed()` after the strategy's `harvest()` completes
+- This reads the live aToken balance, which is the ground truth post-harvest
+- The `HappyPathTest` assertion was correctly changed from `assertEq` to `assertApproxEqAbs` to account for Aave rounding
+
+### `removeAsset()` idle balance check (lines 256-257) — Good
+
+- Simple, correct. Prevents TVL under-reporting.
+
+### `migrateStrategy()` (lines 308-329) — Good, one minor note
+
+- Validates new strategy's asset and vault binding
+- Uses `emergencyWithdraw` on the old strategy (not `withdraw`) — correct choice, avoids partial withdrawal edge cases
+- Funds land in `idleBalance`, not directly re-deployed — clean two-step (migrate, then deploy if desired)
+- **Note**: If `emergencyWithdraw` returns less than `principal` (e.g., Aave liquidity crunch), the migration still completes. The vault's idle balance gets whatever was recovered, and `deployedPrincipal` zeroes out. This is the right behavior — don't block migration on rounding dust. But in extreme Aave liquidity scenarios, the admin should be aware they may not recover 100%.
+- **Minor**: The `principal > 0` guard skips the `emergencyWithdraw` call when nothing is deployed. Good optimization.
+
+### `JudgementFixTest.sol` — Strong
+
+- **M-01 tests**: Happy path withdraw, full withdraw, insufficient balance, zero amount, zero recipient, RBAC, non-whitelisted asset. Thorough.
+- **M-02 test**: Deploys, warps 1 year, harvests, asserts `deployedPrincipal == strategy.totalDeployed()`. Correct.
+- **L-01 tests**: Both positive (idle=0 removal succeeds) and negative (idle>0 reverts). Good.
+- **L-03 tests**: Migration with/without deployed funds, no-strategy revert, RBAC revert, asset mismatch revert. Comprehensive.
+- **Fuzz tests**: `testFuzz_deposit_and_withdraw_idle` and `testFuzz_deploy_and_withdraw_ratio` with bounded inputs. This was a gap I called out — addressed.
+
+---
+
+## Remaining Nits (unchanged, not blocking)
+
+- **Dual AccessControl inheritance boilerplate** — ~60 lines of diamond resolution overrides. Functional but noisy.
+- **Test file organization** — `HardeningTest` is still a catch-all. `JudgementFixTest` is well-scoped though.
+- **`ReentrancyGuardTransient` on both vault AND strategy** — double transient storage lock on deploy/withdraw paths. Gas overhead is minimal but exists.
+- **`withdraw()` not paused** — intentional asymmetry (deposit pauses, withdraw doesn't). Should be documented for operators.
+
+---
+
+## Updated Scoring
+
+| Criterion | Rating | Delta |
+|---|---|---|
+| Correctness | 9/10 | +1 — idle withdrawal path closes the main gap |
+| Architecture & Extensibility | 9.5/10 | +0.5 — `migrateStrategy` makes the extensibility story complete |
+| Security-mindedness | 8.5/10 | +0.5 — idle balance check on removal, proper validation on new functions |
+| Accounting/Reporting | 9/10 | +2 — `deployedPrincipal` sync eliminates stale data concern |
+| RBAC | 9/10 | unchanged — was already strong |
+| Test quality | 8.5/10 | +1.5 — fuzz tests, migration tests, thorough negative cases |
+| Overall quality | **9/10** | +1 |
 
 ---
 
 ## Bottom Line
 
-This is a passing submission. The architecture is right, the security posture is solid, and the Aave integration is correct. The biggest gap is the lack of an idle withdrawal path. The `deployedPrincipal` accounting drift after harvest is a secondary concern. Everything else is polish.
+The fix round addressed every actionable finding from round 1. The new code is clean, correctly validated, and well-tested. The `withdraw()` function closes the most significant functional gap. The `migrateStrategy()` is a nice operational improvement. The fuzz tests show stronger test thinking.
+
+This is a strong submission. The remaining items are polish, not substance.
