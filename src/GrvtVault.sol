@@ -73,7 +73,7 @@ contract GrvtVault is
     event AssetRemoved(address indexed asset);
     event StrategySet(address indexed asset, address indexed strategy);
     event StrategyRemoved(address indexed asset, address indexed oldStrategy);
-    event StrategyMigrated(address indexed asset, address indexed oldStrategy, address indexed newStrategy, uint256 recovered);
+    event StrategyMigrated(address indexed asset, address indexed oldStrategy, address indexed newStrategy, uint256 recovered, uint256 yieldHarvested);
     event GrvtBankUpdated(address indexed oldBank, address indexed newBank);
 
     // -------------------------------------------------------------------------
@@ -321,9 +321,7 @@ contract GrvtVault is
         uint256 principal = deployedPrincipal[asset];
         if (principal > 0) {
             // Harvest yield first — sends directly to grvtBank, not into idle
-            if (grvtBank != address(0)) {
-                yieldHarvested = IStrategy(oldStrategy).harvest(grvtBank);
-            }
+            yieldHarvested = IStrategy(oldStrategy).harvest(grvtBank);
 
             // Withdraw remaining principal
             recovered = IStrategy(oldStrategy).emergencyWithdraw(address(this));
@@ -334,7 +332,7 @@ contract GrvtVault is
         // Swap strategy
         assetStrategy[asset] = newStrategy;
 
-        emit StrategyMigrated(asset, oldStrategy, newStrategy, recovered);
+        emit StrategyMigrated(asset, oldStrategy, newStrategy, recovered, yieldHarvested);
     }
 
     /// @notice Set the yield recipient address
