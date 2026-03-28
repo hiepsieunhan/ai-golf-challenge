@@ -21,6 +21,22 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
     error ZeroAddress();
 
     // -------------------------------------------------------------------------
+    // Events
+    // -------------------------------------------------------------------------
+
+    event Deployed(uint256 amount);
+    event Withdrawn(uint256 amount);
+    event YieldHarvested(uint256 yieldAmount, address indexed recipient);
+    event EmergencyWithdrawn(uint256 recovered, address indexed recipient);
+
+    // -------------------------------------------------------------------------
+    // Constants
+    // -------------------------------------------------------------------------
+
+    /// @dev Aave referral code (unused, set to 0)
+    uint16 private constant REFERRAL_CODE = 0;
+
+    // -------------------------------------------------------------------------
     // Immutables
     // -------------------------------------------------------------------------
 
@@ -29,6 +45,9 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
 
     /// @notice Aave V3 Pool proxy address
     address public immutable aavePool;
+
+    /// @notice The aToken corresponding to the underlying asset
+    address public immutable aToken;
 
     /// @notice The ERC-20 asset this strategy handles
     address private immutable _asset;
@@ -66,6 +85,11 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
         vault = _vault;
         aavePool = _aavePool;
         _asset = asset__;
+
+        // Resolve the aToken address from Aave's reserve data
+        address resolvedAToken = IPool(_aavePool).getReserveData(asset__).aTokenAddress;
+        if (resolvedAToken == address(0)) revert ZeroAddress();
+        aToken = resolvedAToken;
     }
 
     // -------------------------------------------------------------------------
@@ -78,16 +102,16 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
     }
 
     /// @inheritdoc IStrategy
-    function totalDeployed() external view override returns (uint256) {
-        // Wave 2
-        return 0;
+    function totalDeployed() public view override returns (uint256) {
+        return IERC20(aToken).balanceOf(address(this));
     }
 
     /// @notice Pending yield available for harvest
-    /// @return yield The difference between current aToken balance and principal
+    /// @return The difference between current aToken balance and principal
     function pendingYield() external view returns (uint256) {
-        // Wave 2
-        return 0;
+        uint256 current = totalDeployed();
+        if (current <= _principal) return 0;
+        return current - _principal;
     }
 
     // -------------------------------------------------------------------------
@@ -96,24 +120,66 @@ contract AaveV3Strategy is IStrategy, ReentrancyGuardTransient {
 
     /// @inheritdoc IStrategy
     function deploy(uint256 amount) external override onlyVault nonReentrant {
-        // Wave 2
+        if (amount == 0) revert ZeroAmount();
+
+        IERC20 token = IERC20(_asset);
+
+        // Approve Aave Pool to pull tokens, then supply
+        token.forceApprove(aavePool, amount);
+        IPool(aavePool).supply(_asset, amount, address(this), REFERRAL_CODE);
+        token.forceApprove(aavePool, 0);
+
+        _principal += amount;
+
+        emit Deployed(amount);
     }
 
     /// @inheritdoc IStrategy
     function withdraw(uint256 amount) external override onlyVault nonReentrant returns (uint256 actual) {
-        // Wave 2
-        return 0;
+        if (amount == 0) revert ZeroAmount();
+
+        // Aave natively handles type(uint256).max as "withdraw all"
+        actual = IPool(aavePool).withdraw(_asset, amount, vault);
+
+        // Adjust principal: floor at zero for safety (handles rounding)
+        if (amount == type(uint256).max || actual >= _principal) {
+            _principal = 0;
+        } else {
+            _principal -= actual;
+        }
+
+        emit Withdrawn(actual);
     }
 
     /// @inheritdoc IStrategy
     function harvest(address recipient) external override onlyVault nonReentrant returns (uint256 yieldAmount) {
-        // Wave 2
-        return 0;
+        if (recipient == address(0)) revert ZeroAddress();
+
+        uint256 current = totalDeployed();
+        if (current <= _principal) return 0;
+
+        yieldAmount = current - _principal;
+
+        // Withdraw only the yield portion, send directly to recipient
+        IPool(aavePool).withdraw(_asset, yieldAmount, recipient);
+
+        // _principal unchanged — remaining aToken balance still equals principal
+
+        emit YieldHarvested(yieldAmount, recipient);
     }
 
     /// @inheritdoc IStrategy
     function emergencyWithdraw(address recipient) external override onlyVault nonReentrant returns (uint256 recovered) {
-        // Wave 2
-        return 0;
+        if (recipient == address(0)) revert ZeroAddress();
+
+        uint256 balance = IERC20(aToken).balanceOf(address(this));
+        if (balance == 0) return 0;
+
+        // Withdraw everything from Aave
+        recovered = IPool(aavePool).withdraw(_asset, type(uint256).max, recipient);
+
+        _principal = 0;
+
+        emit EmergencyWithdrawn(recovered, recipient);
     }
 }

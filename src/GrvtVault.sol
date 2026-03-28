@@ -117,12 +117,25 @@ contract GrvtVault is
     /// @param asset Token address (must be whitelisted)
     /// @param amount Amount to deposit
     function deposit(address asset, uint256 amount) external nonReentrant whenNotPaused onlyRole(DEPOSITOR_ROLE) {
-        // Wave 2
+        if (amount == 0) revert ZeroAmount();
+        if (!whitelistedAssets[asset]) revert AssetNotWhitelisted(asset);
+
+        uint256 balanceBefore = IERC20(asset).balanceOf(address(this));
+        IERC20(asset).safeTransferFrom(msg.sender, address(this), amount);
+        uint256 received = IERC20(asset).balanceOf(address(this)) - balanceBefore;
+
+        idleBalance[asset] += received;
+        emit Deposited(msg.sender, asset, received);
     }
 
     /// @notice Deposit native ETH — auto-wraps to WETH
     function depositETH() external payable nonReentrant whenNotPaused onlyRole(DEPOSITOR_ROLE) {
-        // Wave 2
+        if (msg.value == 0) revert ZeroAmount();
+        if (!whitelistedAssets[WETH]) revert AssetNotWhitelisted(WETH);
+
+        IWETH(WETH).deposit{value: msg.value}();
+        idleBalance[WETH] += msg.value;
+        emit Deposited(msg.sender, WETH, msg.value);
     }
 
     // -------------------------------------------------------------------------
@@ -133,20 +146,59 @@ contract GrvtVault is
     /// @param asset Token to deploy
     /// @param amount Amount to deploy from idle balance
     function deployToStrategy(address asset, uint256 amount) external nonReentrant whenNotPaused onlyRole(STRATEGIST_ROLE) {
-        // Wave 2
+        if (amount == 0) revert ZeroAmount();
+        address strategy = assetStrategy[asset];
+        if (strategy == address(0)) revert StrategyNotSet(asset);
+
+        uint256 idle = idleBalance[asset];
+        if (idle < amount) revert InsufficientIdleBalance(asset, idle, amount);
+
+        idleBalance[asset] -= amount;
+        deployedPrincipal[asset] += amount;
+
+        IERC20(asset).safeTransfer(strategy, amount);
+        IStrategy(strategy).deploy(amount);
+
+        emit DeployedToStrategy(asset, strategy, amount);
     }
 
     /// @notice Withdraw assets from the strategy back to idle
     /// @param asset Token to withdraw
     /// @param amount Amount to withdraw (type(uint256).max = all)
     function withdrawFromStrategy(address asset, uint256 amount) external nonReentrant onlyRole(STRATEGIST_ROLE) {
-        // Wave 2
+        if (amount == 0) revert ZeroAmount();
+        address strategy = assetStrategy[asset];
+        if (strategy == address(0)) revert StrategyNotSet(asset);
+
+        uint256 principal = deployedPrincipal[asset];
+        if (amount != type(uint256).max && principal < amount) {
+            revert InsufficientDeployedBalance(asset, principal, amount);
+        }
+
+        uint256 actual = IStrategy(strategy).withdraw(amount);
+
+        if (amount == type(uint256).max) {
+            deployedPrincipal[asset] = 0;
+        } else {
+            deployedPrincipal[asset] -= actual;
+        }
+        idleBalance[asset] += actual;
+
+        emit WithdrawnFromStrategy(asset, strategy, actual);
     }
 
     /// @notice Harvest yield from strategy, send to grvtBank
     /// @param asset Token whose yield to harvest
     function harvest(address asset) external nonReentrant whenNotPaused onlyRole(STRATEGIST_ROLE) {
-        // Wave 2
+        address strategy = assetStrategy[asset];
+        if (strategy == address(0)) revert StrategyNotSet(asset);
+        if (grvtBank == address(0)) revert GrvtBankNotSet();
+
+        uint256 yieldAmount = IStrategy(strategy).harvest(grvtBank);
+
+        if (yieldAmount > 0) {
+            emit Harvested(asset, strategy, yieldAmount, grvtBank);
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -156,32 +208,69 @@ contract GrvtVault is
     /// @notice Whitelist an asset for deposits
     /// @param asset Token address
     function whitelistAsset(address asset) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        // Wave 2
+        if (asset == address(0)) revert ZeroAddress();
+        if (whitelistedAssets[asset]) revert AssetAlreadyWhitelisted(asset);
+
+        whitelistedAssets[asset] = true;
+        _assetList.push(asset);
+        emit AssetWhitelisted(asset);
     }
 
     /// @notice Remove asset from whitelist (does not affect existing balances)
     /// @param asset Token address
     function removeAsset(address asset) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        // Wave 2
+        if (!whitelistedAssets[asset]) revert AssetNotWhitelisted(asset);
+
+        whitelistedAssets[asset] = false;
+
+        // Remove from _assetList by swap-and-pop
+        uint256 len = _assetList.length;
+        for (uint256 i; i < len; ++i) {
+            if (_assetList[i] == asset) {
+                _assetList[i] = _assetList[len - 1];
+                _assetList.pop();
+                break;
+            }
+        }
+
+        emit AssetRemoved(asset);
     }
 
     /// @notice Register or replace the strategy for an asset
     /// @param asset Token address
     /// @param strategy IStrategy implementation address
     function setStrategy(address asset, address strategy) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        // Wave 2
+        if (asset == address(0)) revert ZeroAddress();
+        if (strategy == address(0)) revert ZeroAddress();
+        if (!whitelistedAssets[asset]) revert AssetNotWhitelisted(asset);
+        if (assetStrategy[asset] != address(0)) revert StrategyAlreadySet(asset);
+        if (IStrategy(strategy).asset() != asset) revert StrategyAssetMismatch(asset, IStrategy(strategy).asset());
+
+        assetStrategy[asset] = strategy;
+        emit StrategySet(asset, strategy);
     }
 
     /// @notice Remove the strategy for an asset (must have zero deployed)
     /// @param asset Token address
     function removeStrategy(address asset) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        // Wave 2
+        address oldStrategy = assetStrategy[asset];
+        if (oldStrategy == address(0)) revert StrategyNotSet(asset);
+
+        uint256 remaining = deployedPrincipal[asset];
+        if (remaining > 0) revert StrategyStillDeployed(asset, remaining);
+
+        assetStrategy[asset] = address(0);
+        emit StrategyRemoved(asset, oldStrategy);
     }
 
     /// @notice Set the yield recipient address
     /// @param newGrvtBank Address to receive harvested yield
     function setGrvtBank(address newGrvtBank) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        // Wave 2
+        if (newGrvtBank == address(0)) revert ZeroAddress();
+
+        address oldBank = grvtBank;
+        grvtBank = newGrvtBank;
+        emit GrvtBankUpdated(oldBank, newGrvtBank);
     }
 
     // -------------------------------------------------------------------------
@@ -201,7 +290,15 @@ contract GrvtVault is
     /// @notice Emergency: pull all assets from a strategy back to idle
     /// @param asset Token address
     function emergencyWithdrawFromStrategy(address asset) external nonReentrant onlyRole(DEFAULT_ADMIN_ROLE) {
-        // Wave 2
+        address strategy = assetStrategy[asset];
+        if (strategy == address(0)) revert StrategyNotSet(asset);
+
+        uint256 recovered = IStrategy(strategy).emergencyWithdraw(address(this));
+
+        idleBalance[asset] += recovered;
+        deployedPrincipal[asset] = 0;
+
+        emit EmergencyWithdrawal(asset, strategy, recovered);
     }
 
     // -------------------------------------------------------------------------
@@ -214,11 +311,14 @@ contract GrvtVault is
     /// @return deployed Current value in strategy (principal + yield)
     /// @return total idle + deployed
     function getAssetBalance(address asset)
-        external
+        public
         view
         returns (uint256 idle, uint256 deployed, uint256 total)
     {
-        // Wave 2
+        idle = idleBalance[asset];
+        address strategy = assetStrategy[asset];
+        deployed = strategy != address(0) ? IStrategy(strategy).totalDeployed() : deployedPrincipal[asset];
+        total = idle + deployed;
     }
 
     /// @notice All whitelisted assets and their balances
@@ -236,7 +336,15 @@ contract GrvtVault is
             uint256[] memory total
         )
     {
-        // Wave 2
+        uint256 len = _assetList.length;
+        assets = _assetList;
+        idle = new uint256[](len);
+        deployed = new uint256[](len);
+        total = new uint256[](len);
+
+        for (uint256 i; i < len; ++i) {
+            (idle[i], deployed[i], total[i]) = getAssetBalance(assets[i]);
+        }
     }
 
     /// @notice List all whitelisted asset addresses
