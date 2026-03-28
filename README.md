@@ -274,10 +274,27 @@ git add -A
 git commit -m "architecture: finalized vault design with [brief summary of key choices]"
 ```
 
-> **Claude Code automation note:** The architecture synthesis (2.2) is a good use of
-> Claude Code. The decision-making (2.3) must be yours. The finalization (2.4) is
-> Claude Code again. The decision log (2.5) is ideally yours, but Claude can draft it
-> if you dictate the reasoning.
+### 2.7 Verify architecture against requirements
+
+Run the verification command:
+```
+/verify-architecture
+```
+
+This runs an **automated feedback loop**: a subagent verifies the architecture against all requirements and research findings. If gaps are found, it auto-fixes the architecture doc (without changing your core design decisions), then re-verifies. This repeats up to 3 iterations.
+
+The loop can ADD missing sections and CLARIFY ambiguities, but it will NOT change the design decisions you made (contract structure, RBAC roles, yield approach, ETH handling). If issues remain after 3 iterations, it stops and asks for your input.
+
+After it reports READY:
+
+```bash
+git add -A
+git commit -m "architecture: verified against requirements"
+```
+
+> **Claude Code automation note:** This step is fully automated including fixes. You only
+> intervene if it can't reach READY after 3 iterations (rare — usually means a fundamental
+> design gap that needs a human decision).
 
 ---
 
@@ -479,7 +496,8 @@ git commit -m "final: cleanup and submission"
 |------|-----|-------------|
 | Step 0: Setup | Run commands, create `.env` | Can do this if you prefer |
 | Step 1: Research | Type `/phase1-research`, wait | 4 subagents research in parallel |
-| Step 2: Decide | Read research, make 6 architecture decisions, log reasoning | Proposes options, writes architecture doc |
+| Step 2: Decide | Read research, make architecture decisions, log reasoning | Proposes options, writes architecture doc |
+| Step 2.7: Verify | Type `/verify-architecture`, read verdict | Subagent checks architecture vs. requirements |
 | Step 3: Implement | Type `/phase2-implement`, monitor | Agent team builds in 3 waves with feedback loops |
 | Step 4: Review | Type `/phase3-review`, wait | 3 subagents audit in parallel |
 | Step 5: Fix | Decide what to fix, tell Claude | Fixes issues, re-runs tests |
