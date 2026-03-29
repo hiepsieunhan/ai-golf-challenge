@@ -1,6 +1,6 @@
 # GRVT Yield Vault
 
-A treasury vault system that accepts capital, deploys it into yield strategies (Aave V3), and harvests yield to a designated recipient. Built entirely with AI-assisted development using Claude Code.
+A submission for the [AI Solidity Golf Challenge](https://gist.github.com/minhbsq/5885d1b9fc380f90f01e24a5e82961fa) — a treasury vault system that accepts capital, deploys it into yield strategies (Aave V3), and harvests yield to a designated recipient. Built entirely with AI-assisted development using Claude Code.
 
 ## Approach
 
