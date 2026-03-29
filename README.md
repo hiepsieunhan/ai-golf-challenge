@@ -1,540 +1,109 @@
-# GRVT Yield Vault — Setup & Execution Guide
+# GRVT Yield Vault
 
-A step-by-step guide to building the GRVT Yield Vault using Claude Code with multi-agent orchestration.
+A treasury vault system that accepts capital, deploys it into yield strategies (Aave V3), and harvests yield to a designated recipient. Built entirely with AI-assisted development using Claude Code.
 
----
+## Approach
 
-## Prerequisites
+The core idea: **design the AI workflow before writing any code.**
 
-### 1. Install Foundry (Solidity toolchain)
+Before touching Solidity, I used Claude to discuss and design a multi-phase, multi-agent workflow. The goal was to break the problem into stages where specialized AI agents handle different concerns — research, implementation, review — with human decision-making at the critical architecture step.
+
+The workflow has 3 phases, each driven by purpose-built sub-agents defined in `.claude/agents/` and orchestrated via slash commands in `.claude/commands/`:
+
+**Phase 1 — Research** (4 parallel agents)
+Each agent researches one domain and writes findings to `docs/research/`:
+- Vault architecture patterns (ERC-4626, multi-asset, strategy interfaces)
+- Aave V3 integration details (Pool interface, aToken mechanics, yield accounting)
+- Security patterns (RBAC, reentrancy, emergency controls, audit findings)
+- Testing patterns (Foundry fork testing, yield simulation, DeFi test strategies)
+
+**Phase 2 — Implementation** (Agent Team: lead + 3 specialists)
+A team of agents builds in 3 gated waves, each with a compile/test gate before proceeding:
+1. Interfaces + skeletons (must compile)
+2. Core logic + happy path tests (tests must pass)
+3. Hardening — RBAC tests, edge cases, NatSpec (all tests pass, zero warnings)
+
+**Phase 3 — Review** (3 parallel agents)
+Three independent reviewers audit the output:
+- Security auditor (reentrancy, access control, unsafe calls, DeFi vulnerabilities)
+- Requirements verifier (cross-references `docs/requirements.md` against implementation)
+- Code quality reviewer (NatSpec, events, naming, gas, organization)
+
+Between phases, the human makes the key decisions — architecture choices, which review findings to fix, and when to stop iterating.
+
+## What the Human Does vs. What AI Does
+
+| Step | Human | AI |
+|------|-------|-----|
+| Workflow design | Design phases, agent roles, orchestration | Discuss and refine the approach |
+| Research | Kick off, skim results | 4 agents research in parallel |
+| Architecture | Read options, make decisions, log reasoning | Propose options, write architecture doc |
+| Implementation | Monitor, intervene if stuck | Agent team builds in 3 waves |
+| Review | Decide what to fix | 3 agents audit in parallel |
+| Fix | Prioritize findings | Fix code, re-run tests |
+| Creator review | Read judgement, iterate | Play role of challenge author, score |
+
+## The Creator Review Loop
+
+After the standard build-review-fix cycle, I added an extra step: asking Claude to **play the role of the challenge creator** and review the submission as if grading it. This catches design-level gaps that mechanical reviewers miss — things that are technically correct but would lose points.
+
+This loop ran iteratively (review → fix → re-review) until findings converged to info-level only:
+
+| Round | Score | Key findings addressed |
+|-------|-------|----------------------|
+| 1 | 8/10 | No idle withdrawal path, stale `deployedPrincipal` after harvest |
+| 2 | 9/10 | Added `withdraw()`, `migrateStrategy()`, fuzz tests |
+| 3 | 9.5/10 | Simplified inheritance, added `emergencyWithdrawIdle`, invariant tests |
+| 4+ | 9.5+ | Harvest-before-migrate, multi-asset invariants, event completeness |
+| Final | 9.8/10 | No actionable findings remaining |
+
+Full judgements: [`docs/judgement/`](docs/judgement/)
+
+## Results
+
+**3 contracts, ~680 lines of Solidity.** ~70 tests including fuzz and stateful invariants, all running against real Aave V3 on a mainnet fork.
+
+```
+src/
+  GrvtVault.sol              445 lines — Core vault (accounting, RBAC, fund routing)
+  interfaces/IStrategy.sol    44 lines — Strategy interface
+  strategies/AaveV3Strategy  194 lines — Aave V3 implementation
+```
+
+Key properties:
+- **4-role RBAC** (Admin, Strategist, Depositor, Guardian) with 1-day admin transfer delay
+- **Fee-on-transfer safe** deposits (before/after balance check)
+- **ReentrancyGuardTransient** (EIP-1153) on all fund-moving functions
+- **Pause design**: inbound operations pause, outbound/emergency never trapped
+- **Atomic strategy migration** with yield harvest to grvtBank
+- **Live TVL reporting** via aToken balance (not stale bookkeeping)
+- **Mainnet fork tests** — not mocks. Validates real Aave V3 integration.
+
+## Build & Test
 
 ```bash
-curl -L https://foundry.paradigm.xyz | bash
-foundryup
-```
-
-Verify:
-```bash
-forge --version
-```
-
-### 2. Install Claude Code
-
-```bash
-npm install -g @anthropic-ai/claude-code
-```
-
-You need a Claude Pro ($20/mo) or Max ($100–200/mo) plan. Max is recommended — Agent Teams burn tokens fast, and you'll need headroom for Phase 2.
-
-### 3. Get an Ethereum Mainnet RPC URL
-
-Fork tests run against real Aave V3 on Ethereum mainnet. You need an RPC endpoint with archive data access.
-
-**Free options (any one of these):**
-
-| Provider | Free Tier | Sign Up |
-|----------|-----------|---------|
-| Alchemy | 30M compute units/mo (~1.2M requests) | https://www.alchemy.com/ |
-| Infura | ~100k requests/day | https://www.infura.io/ |
-| Chainstack | 3M requests/mo | https://chainstack.com/ |
-
-After signing up, create a project for Ethereum Mainnet and copy your RPC URL. It will look like:
-```
-https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY
-# or
-https://mainnet.infura.io/v3/YOUR_API_KEY
-```
-
-### 4. Install tmux (optional but recommended)
-
-Agent Teams show each teammate in a separate terminal pane if tmux is available:
-```bash
-# macOS
-brew install tmux
-
-# Ubuntu/Debian
-sudo apt install tmux
-```
-
-Without tmux, Agent Teams still work but all output appears in one thread.
-
----
-
-## Step 0: Project Initialization
-
-**Time:** ~10 minutes
-**Who does it:** You (manual)
-
-### 0.1 Create the Foundry project
-
-```bash
-mkdir grvt-yield-vault && cd grvt-yield-vault
-forge init --no-commit
-```
-
-### 0.2 Install Solidity dependencies
-
-```bash
-forge install OpenZeppelin/openzeppelin-contracts --no-commit
-forge install aave/aave-v3-core --no-commit
-```
-
-### 0.3 Configure remappings
-
-Create `remappings.txt` in the project root:
-```
-@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/
-@aave/v3-core/=lib/aave-v3-core/
-forge-std/=lib/forge-std/src/
-```
-
-### 0.4 Configure Solidity version
-
-Edit `foundry.toml` and set:
-```toml
-[profile.default]
-src = "src"
-out = "out"
-libs = ["lib"]
-solc_version = "0.8.34"
-```
-
-### 0.5 Set up the RPC URL
-
-Create a `.env` file in the project root (**do NOT commit this**):
-```bash
-ETH_RPC_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_API_KEY
-```
-
-Add `.env` to `.gitignore`:
-```bash
-echo ".env" >> .gitignore
-```
-
-To load it in your shell:
-```bash
-source .env
-```
-
-### 0.6 Extract the scaffold files
-
-Extract the provided `grvt-yield-vault-scaffold.tar.gz` into the project. This adds:
-- `CLAUDE.md`
-- `docs/` (requirements, decision log template)
-- `.claude/agents/` (7 subagent definitions)
-- `.claude/commands/` (3 phase commands)
-- `.claude/settings.json` (Agent Teams enabled)
-
-```bash
-# From the project root, extract (adjust path to where you downloaded the tar):
-tar -xzf /path/to/grvt-yield-vault-scaffold.tar.gz --strip-components=1
-```
-
-> **NOTE:** If the tar extraction creates duplicate directories, just manually copy
-> the `CLAUDE.md`, `docs/`, and `.claude/` folders into your project root.
-
-### 0.7 Remove Foundry's default scaffolded files
-
-```bash
-rm src/Counter.sol test/Counter.t.sol script/Counter.s.sol
-```
-
-### 0.8 Verify everything compiles
-
-```bash
-forge build
-```
-
-It should succeed (with nothing to compile yet since we removed the default files).
-
-### 0.9 Initial commit
-
-```bash
-git add -A
-git commit -m "init: foundry project with OpenZeppelin, Aave V3, and agent scaffold"
-```
-
-> **Claude Code automation note:** Steps 0.1–0.9 could be done by Claude Code with a
-> single prompt, but doing it manually ensures you understand the project structure and
-> avoids wasting tokens on setup. If you prefer, you can ask Claude Code:
-> *"Initialize a Foundry project, install OpenZeppelin and Aave V3 dependencies,
-> configure remappings.txt and foundry.toml for Solidity 0.8.34."*
-
----
-
-## Step 1: Phase 1 — Research
-
-**Time:** ~15–30 minutes (agents work in parallel)
-**Who does it:** Claude Code (you watch)
-
-### 1.1 Start Claude Code
-
-```bash
-cd grvt-yield-vault
-source .env
-claude
-```
-
-### 1.2 Run the research command
-
-Type:
-```
-/phase1-research
-```
-
-This spawns 4 research subagents in parallel:
-- **researcher-vault-arch** → `docs/research/vault-architecture.md`
-- **researcher-aave** → `docs/research/aave-v3-deep-dive.md`
-- **researcher-security** → `docs/research/security-rbac.md`
-- **researcher-testing** → `docs/research/testing-yield-accounting.md`
-
-Wait for all 4 to complete. Claude will give you a summary.
-
-### 1.3 Commit research
-
-```bash
-git add -A
-git commit -m "research: phase 1 complete — vault architecture, aave v3, security, testing"
-```
-
----
-
-## Step 2: Synthesize & Decide (YOUR CRITICAL STEP)
-
-**Time:** ~30–60 minutes
-**Who does it:** You + Claude Code (interactive)
-
-This is the most important step. You're making architecture decisions that shape everything.
-
-### 2.1 Read the research (skim is fine)
-
-You don't need to understand every Solidity detail. Focus on:
-- What patterns/options each researcher proposed
-- What tradeoffs they identified
-- What they recommended
-
-### 2.2 Ask Claude to propose architecture options
-
-Still in the same Claude Code session, prompt:
-
-```
-Read all files in docs/research/. Based on these findings, propose 2-3 architecture
-options for the vault system. For each option, cover:
-- Contract structure (how many contracts, what each does)
-- Strategy interface design
-- RBAC role structure
-- ETH handling approach
-- Yield accounting approach
-- Emergency controls (if any)
-- TVL reporting interface
-Show tradeoffs between options. Write to docs/architecture-options.md.
-```
-
-### 2.3 Make your decisions
-
-Read `docs/architecture-options.md`. For each open question, pick an option. You're looking at ~6 decisions:
-
-| Decision | What to consider |
-|----------|-----------------|
-| **Contract structure** | Simpler = fewer bugs, more complex = more extensible |
-| **RBAC roles** | 2-tier minimum (admin + operator). 3-tier adds funding separation. More roles = more security but more complexity |
-| **ETH handling** | WETH wrapping is simplest for uniform ERC20 logic. Separate path is more gas efficient but more code |
-| **Yield accounting** | Principal tracking is simple and easy to audit. Scaled balances are more precise but harder to understand |
-| **Emergency controls** | Pausable is low-cost to add and shows production-mindedness |
-| **TVL reporting** | View functions are minimum. Events help indexers |
-
-### 2.4 Finalize architecture
-
-Prompt Claude Code:
-
-```
-Based on my decisions: [state your choices clearly].
-Write the final architecture document to docs/architecture.md. Include:
-- Contract file names and responsibilities
-- Full interface definitions (function signatures)
-- RBAC role names and what each can do
-- Data structures (mappings, structs)
-- Fund flow diagrams (text-based)
-- Yield accounting approach
-- ETH handling approach
-```
-
-### 2.5 Log your decisions
-
-Edit `docs/decisions/decision-log.md` yourself (or ask Claude). For each decision, write:
-- What you chose
-- Why (1-2 sentences is enough)
-
-This is what makes the submission look human-steered rather than auto-generated.
-
-### 2.6 Commit
-
-```bash
-git add -A
-git commit -m "architecture: finalized vault design with [brief summary of key choices]"
-```
-
-### 2.7 Verify architecture against requirements
-
-Run the verification command:
-```
-/verify-architecture
-```
-
-This runs an **automated feedback loop**: a subagent verifies the architecture against all requirements and research findings. If gaps are found, it auto-fixes the architecture doc (without changing your core design decisions), then re-verifies. This repeats up to 3 iterations.
-
-The loop can ADD missing sections and CLARIFY ambiguities, but it will NOT change the design decisions you made (contract structure, RBAC roles, yield approach, ETH handling). If issues remain after 3 iterations, it stops and asks for your input.
-
-After it reports READY:
-
-```bash
-git add -A
-git commit -m "architecture: verified against requirements"
-```
-
-> **Claude Code automation note:** This step is fully automated including fixes. You only
-> intervene if it can't reach READY after 3 iterations (rare — usually means a fundamental
-> design gap that needs a human decision).
-
----
-
-## Step 3: Phase 2 — Implementation
-
-**Time:** ~45–90 minutes (agent team works in 3 waves)
-**Who does it:** Claude Code Agent Team (you monitor)
-
-### 3.1 Start a FRESH Claude Code session
-
-This is critical. A fresh session starts with a clean context window, loading only `CLAUDE.md` and the files on disk (including your architecture doc).
-
-```bash
-# Exit the previous session first (Ctrl+C or type /exit)
-claude
-```
-
-### 3.2 Run the implementation command
-
-```
-/phase2-implement
-```
-
-This creates an Agent Team with a lead + 3 teammates (Vault Engineer, Strategy Engineer, Test Engineer). The team works in 3 waves:
-
-**Wave 1: Interfaces + Skeletons**
-- All contracts created with function signatures
-- Gate: `forge build` must pass
-- Auto-commit: `impl: wave 1 — interfaces and skeletons compile`
-
-**Wave 2: Core Implementation**
-- Full logic implemented
-- Test Engineer writes and runs tests IN PARALLEL
-- Feedback loop: failed tests → direct message to responsible engineer → fix
-- Gate: all happy path tests pass
-- Auto-commit: `impl: wave 2 — core logic + happy path tests passing`
-
-**Wave 3: Hardening**
-- RBAC restriction tests, edge cases, NatSpec, events
-- Gate: all tests pass, `forge build` zero warnings
-- Auto-commit: `impl: wave 3 — hardening, RBAC tests, edge cases, NatSpec`
-
-### 3.3 Monitor (optional but recommended)
-
-If you have tmux, you can watch each teammate in its own pane. Use `Shift+Down` to cycle between teammates if using in-process mode.
-
-Things to watch for:
-- Interface mismatches between vault and strategy (the lead should catch this)
-- Tests failing repeatedly on the same issue (might need your input)
-- Context getting too long (if a teammate seems confused, the lead should compact or restart it)
-
-### 3.4 If something goes wrong
-
-If the agent team stalls or produces broken code:
-- You can talk directly to a specific teammate
-- You can message the lead with corrections
-- Worst case: exit, `git stash`, start a new session, and re-run `/phase2-implement`
-
-### 3.5 Verify after Phase 2
-
-Once the team reports done:
-
-```bash
-source .env
 forge build
 forge test --fork-url $ETH_RPC_URL -vvv
 ```
 
-Skim the output:
-- Do all tests pass?
-- Are test names descriptive?
-- Do the contract files match your architecture doc?
-
-> **Claude Code automation note:** Phase 2 is almost entirely automated. Your role is
-> monitoring and intervening only if things go sideways. The commits happen
-> automatically at each wave gate.
-
----
-
-## Step 4: Phase 3 — Review
-
-**Time:** ~15–30 minutes (agents work in parallel)
-**Who does it:** Claude Code (you read results)
-
-### 4.1 Start a FRESH Claude Code session
-
-```bash
-claude
-```
-
-### 4.2 Run the review command
+## Project Structure
 
 ```
-/phase3-review
+src/                          Solidity contracts
+test/                         Foundry tests (fork, fuzz, invariant)
+docs/
+  requirements.md             Challenge problem statement
+  architecture.md             Design document
+  research/                   Phase 1 research outputs
+  review/                     Phase 3 review outputs
+  judgement/                   Creator review loop history
+  decisions/                  Architecture decision log
+  execution-guide.md          Step-by-step setup & execution guide
+.claude/
+  agents/                     Sub-agent definitions (7 agents)
+  commands/                   Phase slash commands
 ```
 
-This spawns 3 review subagents in parallel:
-- **security-auditor** → `docs/review/security-audit.md`
-- **requirements-verifier** → `docs/review/requirements-checklist.md`
-- **code-quality-reviewer** → `docs/review/code-quality.md`
+## Detailed Execution Guide
 
-### 4.3 Commit review results
-
-```bash
-git add -A
-git commit -m "review: security audit, requirements checklist, code quality review"
-```
-
----
-
-## Step 5: Fix Review Findings (YOUR DECISION STEP)
-
-**Time:** ~15–45 minutes
-**Who does it:** You decide what to fix, Claude Code fixes it
-
-### 5.1 Read the review docs
-
-Focus on:
-1. `docs/review/security-audit.md` — any CRITICAL or HIGH findings?
-2. `docs/review/requirements-checklist.md` — any FAIL items?
-3. `docs/review/code-quality.md` — top 5 SHOULD FIX items
-
-### 5.2 Tell Claude Code what to fix
-
-Still in the same session, prompt:
-
-```
-Read all files in docs/review/. Fix the following:
-- All CRITICAL and HIGH security findings
-- All FAIL items from the requirements checklist
-- The top [N] code quality issues marked SHOULD FIX
-
-After fixing, run forge build and forge test to verify everything still passes.
-```
-
-### 5.3 Final verification
-
-```bash
-source .env
-forge build
-forge test --fork-url $ETH_RPC_URL -vvv
-```
-
-### 5.4 Final commit
-
-```bash
-git add -A
-git commit -m "fix: addressed security findings and requirements gaps"
-```
-
-> **Claude Code automation note:** The fix step is a good candidate for Claude Code
-> to handle autonomously. You just need to tell it which findings to prioritize.
-
----
-
-## Step 6: Challenge Creator Review Loop
-
-**Time:** ~30–60 minutes (multiple iterations)
-**Who does it:** Claude Code plays the role of the challenge author, you fix what it finds
-
-After the automated Phase 3 review and fixes, we ran an additional review loop where Claude Code assumed the perspective of the challenge creator — the person who wrote `docs/requirements.md` and will judge submissions.
-
-This is different from Phase 3's automated reviewers. Those check for security bugs, requirements coverage, and code quality mechanically. The challenge creator review asks: *"If I were grading this submission, what would I dock points for?"*
-
-### How it works
-
-1. **Ask Claude to review as the challenge author.** Prompt:
-   ```
-   Play the role of the engineer who created this challenge. Review the full
-   codebase against the requirements. Give your judgement — scoring, findings,
-   what works, what doesn't.
-   ```
-
-2. **Claude produces a judgement** — a structured review with per-criterion scoring, specific findings (with severity), and an overall verdict. Store it in `docs/judgement/`.
-
-3. **Fix the findings.** Ask Claude to address the actionable items. Commit the fixes.
-
-4. **Review again with fresh eyes.** Ask Claude to review the updated code as if seeing it for the first time. Repeat until findings converge to info-level only.
-
-### What this caught that Phase 3 missed
-
-The automated reviewers found security bugs and requirements gaps. The challenge creator review found **design gaps** — things that are technically correct but would lose points in a real evaluation:
-
-- No way to withdraw idle funds back to the treasury (capital goes in but can't come out without a strategy)
-- `deployedPrincipal` drifting from reality after harvest (confusing accounting for anyone reading the public state)
-- No atomic strategy migration path (operationally painful multi-step process)
-- No fuzz or invariant tests (weak signal for production-mindedness)
-
-Each iteration improved the score. The full history lives in `docs/judgement/`:
-
-| Round | Score | Key changes |
-|-------|-------|-------------|
-| 1 | 8/10 | Baseline — identified idle withdrawal gap, accounting drift |
-| 2 | 9/10 | Added `withdraw()`, `migrateStrategy()`, harvest re-sync, fuzz tests |
-| 3 | 9.5/10 | Dropped `AccessControlEnumerable` boilerplate, added `whenNotPaused` to withdraw, `emergencyWithdrawIdle`, invariant tests |
-| 4 | 9.5+/10 | Harvest-before-migrate, SCREAMING_SNAKE_CASE on strategy immutables, multi-asset invariant handler |
-| Final | 9.8/10 | Removed dead code guard, added `yieldHarvested` to migration event |
-
----
-
-## Quick Reference: What You Do vs. What Claude Does
-
-| Step | You | Claude Code |
-|------|-----|-------------|
-| Step 0: Setup | Run commands, create `.env` | Can do this if you prefer |
-| Step 1: Research | Type `/phase1-research`, wait | 4 subagents research in parallel |
-| Step 2: Decide | Read research, make architecture decisions, log reasoning | Proposes options, writes architecture doc |
-| Step 2.7: Verify | Type `/verify-architecture`, read verdict | Subagent checks architecture vs. requirements |
-| Step 3: Implement | Type `/phase2-implement`, monitor | Agent team builds in 3 waves with feedback loops |
-| Step 4: Review | Type `/phase3-review`, wait | 3 subagents audit in parallel |
-| Step 5: Fix | Decide what to fix, tell Claude | Fixes issues, re-runs tests |
-| Step 6: Creator Review | Read judgement, decide what to fix, iterate | Reviews as challenge author, scores, identifies design gaps |
-
-**Total estimated time:** 2.5–5 hours depending on how deep you go in Step 2.
-
----
-
-## Troubleshooting
-
-### `forge build` fails after installing dependencies
-Check `remappings.txt` is correct. Run `forge remappings` to see what Foundry auto-detects, and compare with your `remappings.txt`.
-
-### Fork tests fail with "could not connect"
-Verify your `.env` has the correct RPC URL and you ran `source .env` before `forge test`.
-
-### Agent Team teammates don't appear
-Verify `.claude/settings.json` has `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` set to `"1"`. Run `claude --version` to ensure you're on a version from after February 5, 2026.
-
-### Agent Team stalls or loops
-Exit the session, check git status, and start fresh. The wave-gate commits give you safe rollback points.
-
-### Context window fills up during Phase 2
-This is normal for complex implementations. The team lead should handle compaction. If a teammate seems confused, you can message it directly with clarification. Starting a fresh session and re-running is always an option — your code is on disk and committed.
-
-### Research subagents return thin results
-Web search quality varies. You can re-run a specific researcher manually:
-```
-Use the researcher-aave agent to research Aave V3 integration details.
-Focus specifically on [the area that was weak].
-```
-
-### "forge test" passes locally but not with --fork-url
-Fork tests depend on network state. Pin to a specific block number in your test setup for reproducibility. The testing researcher should have covered this.
+For the full step-by-step walkthrough of how to reproduce this workflow (prerequisites, setup, running each phase): [`docs/execution-guide.md`](docs/execution-guide.md)
