@@ -17,6 +17,9 @@ Each agent researches one domain and writes findings to `docs/research/`:
 - Security patterns (RBAC, reentrancy, emergency controls, audit findings)
 - Testing patterns (Foundry fork testing, yield simulation, DeFi test strategies)
 
+**Between phases — Architecture decisions** (human-driven)
+The human reads the research, asks Claude to propose 2-3 architecture options with tradeoffs, then makes the calls: contract structure, RBAC role design, ETH handling, yield accounting approach, emergency controls. These decisions are logged in `docs/decisions/decision-log.md`. An architecture verifier agent then checks the design against requirements and iterates until consistent.
+
 **Phase 2 — Implementation** (Agent Team: lead + 3 specialists)
 A team of agents builds in 3 gated waves, each with a compile/test gate before proceeding:
 1. Interfaces + skeletons (must compile)
