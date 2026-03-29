@@ -45,19 +45,16 @@ Between phases, the human makes the key decisions — architecture choices, whic
 
 ## The Creator Review Loop
 
-After the standard build-review-fix cycle, I added an extra step: asking Claude to **play the role of the challenge creator** and review the submission as if grading it. This catches design-level gaps that mechanical reviewers miss — things that are technically correct but would lose points.
+After the standard build-review-fix cycle, I added an extra step: asking Claude to **play the role of the challenge creator** and review the submission as if grading it. This catches design-level gaps that mechanical reviewers miss — things that compile and pass tests but wouldn't hold up in a real production deployment.
 
-This loop ran iteratively (review → fix → re-review) until findings converged to info-level only:
+This loop ran iteratively (review → fix → re-review) until findings converged to info-level only. Examples of what it caught that the automated Phase 3 reviewers didn't:
 
-| Round | Score | Key findings addressed |
-|-------|-------|----------------------|
-| 1 | 8/10 | No idle withdrawal path, stale `deployedPrincipal` after harvest |
-| 2 | 9/10 | Added `withdraw()`, `migrateStrategy()`, fuzz tests |
-| 3 | 9.5/10 | Simplified inheritance, added `emergencyWithdrawIdle`, invariant tests |
-| 4+ | 9.5+ | Harvest-before-migrate, multi-asset invariants, event completeness |
-| Final | 9.8/10 | No actionable findings remaining |
+- No way to withdraw idle funds back to the treasury — capital could enter but not leave without going through a strategy
+- `deployedPrincipal` drifting from reality after harvest — confusing for anyone reading public state
+- No atomic strategy migration path — swapping strategies required a painful multi-step manual process
+- No fuzz or stateful invariant tests — a weak signal for production-mindedness
 
-Full judgements: [`docs/judgement/`](docs/judgement/)
+Each of these was fixed in subsequent iterations. Full review history: [`docs/judgement/`](docs/judgement/)
 
 ## Results
 
